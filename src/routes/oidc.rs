@@ -1,7 +1,7 @@
 use actix_web::{get, web, HttpResponse};
 use serde::Serialize;
 
-use crate::app::AppState;
+use crate::{app::AppState, auth::token::public_jwks};
 
 #[derive(Debug, Serialize)]
 struct OpenIdConfiguration {
@@ -43,6 +43,17 @@ async fn openid_configuration(state: web::Data<AppState>) -> HttpResponse {
     })
 }
 
+#[get("/.well-known/jwks.json")]
+async fn jwks(state: web::Data<AppState>) -> HttpResponse {
+    match public_jwks(&state.settings) {
+        Ok(jwks) => HttpResponse::Ok().json(jwks),
+        Err(error) => {
+            tracing::error!(%error, "failed to build JWKS");
+            HttpResponse::InternalServerError().finish()
+        }
+    }
+}
+
 pub fn configure(cfg: &mut web::ServiceConfig) {
-    cfg.service(openid_configuration);
+    cfg.service(openid_configuration).service(jwks);
 }

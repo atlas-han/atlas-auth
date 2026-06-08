@@ -204,8 +204,8 @@ async fn issue_token_pair(
     user_id: Uuid,
     family_id: Option<Uuid>,
 ) -> Result<TokenResponse, AppError> {
-    let (access_token, expires_in) =
-        issue_access_token(settings, user_id).map_err(AppError::Internal)?;
+    let (access_token, expires_in) = issue_access_token(settings, user_id, "openid profile email")
+        .map_err(AppError::Internal)?;
     let refresh_token = new_refresh_token();
     let refresh_token_hash = hash_refresh_token(&refresh_token);
     let refresh_token_id = Uuid::new_v4();

@@ -20,11 +20,12 @@ Implemented:
 - Audit event table and basic event writes
 - Initial clients table
 - `/.well-known/openid-configuration` discovery endpoint
+- RS256 access token signing with `kid`, `jti`, and `scope` claims
+- `/.well-known/jwks.json` JWKS endpoint for active public signing key
 
 Major PRD gaps:
 - `/oauth/authorize`, `/oauth/token`, `/oauth/revoke`, `/oauth/introspect`, `/userinfo`
 - Authorization Code + PKCE model and one-time code exchange
-- RS256 signing keys + JWKS + `kid` rotation; current access token implementation still uses symmetric secret
 - OIDC `id_token`
 - Client Credentials grant
 - Consent model/flow

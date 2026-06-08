@@ -29,7 +29,7 @@ Response `200`:
 
 ### GET /.well-known/jwks.json
 
-Status: planned.
+Status: implemented.
 
 Publishes active RS256 public signing keys. Private key material must never be exposed.
 

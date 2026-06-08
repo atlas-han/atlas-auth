@@ -13,7 +13,9 @@ async fn live_endpoint_returns_ok() {
         jwt_audience: "atlas-services".to_string(),
         jwt_access_token_ttl_seconds: 900,
         jwt_refresh_token_ttl_seconds: 2_592_000,
-        jwt_signing_secret: "test-secret-at-least-32-bytes".to_string(),
+        jwt_signing_key_id: "test-key-1".to_string(),
+        jwt_private_key_pem: "unused-in-health-test".to_string(),
+        jwt_public_key_pem: "unused-in-health-test".to_string(),
         password_pepper: "test-pepper".to_string(),
     };
     let pool = PgPoolOptions::new()

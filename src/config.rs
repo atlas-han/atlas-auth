@@ -10,7 +10,9 @@ pub struct Settings {
     pub jwt_audience: String,
     pub jwt_access_token_ttl_seconds: i64,
     pub jwt_refresh_token_ttl_seconds: i64,
-    pub jwt_signing_secret: String,
+    pub jwt_signing_key_id: String,
+    pub jwt_private_key_pem: String,
+    pub jwt_public_key_pem: String,
     pub password_pepper: String,
 }
 
@@ -28,7 +30,9 @@ impl Settings {
             jwt_access_token_ttl_seconds: env_or("JWT_ACCESS_TOKEN_TTL_SECONDS", "900").parse()?,
             jwt_refresh_token_ttl_seconds: env_or("JWT_REFRESH_TOKEN_TTL_SECONDS", "2592000")
                 .parse()?,
-            jwt_signing_secret: env::var("JWT_SIGNING_SECRET")?,
+            jwt_signing_key_id: env_or("JWT_SIGNING_KEY_ID", "local-dev-key"),
+            jwt_private_key_pem: env_pem("JWT_PRIVATE_KEY_PEM")?,
+            jwt_public_key_pem: env_pem("JWT_PUBLIC_KEY_PEM")?,
             password_pepper: env::var("PASSWORD_PEPPER")?,
         })
     }
@@ -40,4 +44,8 @@ impl Settings {
 
 fn env_or(key: &str, default: &str) -> String {
     env::var(key).unwrap_or_else(|_| default.to_string())
+}
+
+fn env_pem(key: &str) -> anyhow::Result<String> {
+    Ok(env::var(key)?.replace("\\n", "\n"))
 }
