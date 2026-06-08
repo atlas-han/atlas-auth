@@ -43,7 +43,7 @@ Authorization Code + PKCE entrypoint. Supports `response_type=code`, `client_id`
 
 ### POST /oauth/token
 
-Status: planned.
+Status: implemented for protocol-level grant-shape validation; DB-backed code exchange, refresh rotation delegation, and client authentication are planned.
 
 Supports:
 - `grant_type=authorization_code`

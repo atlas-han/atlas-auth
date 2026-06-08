@@ -1,4 +1,4 @@
-use actix_web::{get, web, HttpResponse};
+use actix_web::{get, post, web, HttpResponse};
 use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Deserialize)]
@@ -18,6 +18,17 @@ struct OAuthErrorResponse {
     message: &'static str,
 }
 
+#[derive(Debug, Deserialize)]
+struct TokenForm {
+    grant_type: String,
+    client_id: Option<String>,
+    code: Option<String>,
+    code_verifier: Option<String>,
+    redirect_uri: Option<String>,
+    refresh_token: Option<String>,
+    scope: Option<String>,
+}
+
 #[derive(Debug, Serialize)]
 struct AuthorizeValidationResponse {
     status: &'static str,
@@ -27,6 +38,13 @@ struct AuthorizeValidationResponse {
     scope: String,
     state: String,
     code_challenge_method: String,
+}
+
+#[derive(Debug, Serialize)]
+struct TokenValidationResponse {
+    status: &'static str,
+    grant_type: String,
+    client_id: String,
 }
 
 #[get("/oauth/authorize")]
@@ -45,6 +63,76 @@ async fn authorize(query: web::Query<AuthorizeQuery>) -> HttpResponse {
             error: "invalid_request",
             message,
         }),
+    }
+}
+
+#[post("/oauth/token")]
+async fn token(form: web::Form<TokenForm>) -> HttpResponse {
+    match validate_token_form(&form) {
+        Ok(()) => HttpResponse::Ok().json(TokenValidationResponse {
+            status: "validated",
+            grant_type: form.grant_type.clone(),
+            client_id: form.client_id.clone().unwrap_or_default(),
+        }),
+        Err((error, message)) => {
+            HttpResponse::BadRequest().json(OAuthErrorResponse { error, message })
+        }
+    }
+}
+
+fn validate_token_form(form: &TokenForm) -> Result<(), (&'static str, &'static str)> {
+    match form.grant_type.as_str() {
+        "authorization_code" => {
+            let has_code = form
+                .code
+                .as_deref()
+                .is_some_and(|value| !value.trim().is_empty());
+            let has_verifier = form
+                .code_verifier
+                .as_deref()
+                .is_some_and(|value| !value.trim().is_empty());
+            let has_client = form
+                .client_id
+                .as_deref()
+                .is_some_and(|value| !value.trim().is_empty());
+            let has_redirect_uri = form
+                .redirect_uri
+                .as_deref()
+                .is_some_and(|value| !value.trim().is_empty());
+
+            if !has_code || !has_verifier {
+                return Err(("invalid_request", "code and code_verifier are required"));
+            }
+            if !has_client {
+                return Err(("invalid_request", "client_id is required"));
+            }
+            if !has_redirect_uri {
+                return Err(("invalid_request", "redirect_uri is required"));
+            }
+            Ok(())
+        }
+        "refresh_token" => {
+            let has_refresh_token = form
+                .refresh_token
+                .as_deref()
+                .is_some_and(|value| !value.trim().is_empty());
+            if has_refresh_token {
+                Ok(())
+            } else {
+                Err(("invalid_request", "refresh_token is required"))
+            }
+        }
+        "client_credentials" => {
+            if form.scope.as_deref().unwrap_or_default().contains("openid") {
+                Err((
+                    "invalid_scope",
+                    "client_credentials cannot request openid scope",
+                ))
+            } else {
+                Ok(())
+            }
+        }
+        _ => Err(("unsupported_grant_type", "Grant type is not supported")),
     }
 }
 
@@ -78,5 +166,5 @@ fn validate_authorize_query(query: &AuthorizeQuery) -> Result<(), &'static str> 
 }
 
 pub fn configure(cfg: &mut web::ServiceConfig) {
-    cfg.service(authorize);
+    cfg.service(authorize).service(token);
 }

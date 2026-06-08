@@ -25,9 +25,11 @@ Implemented:
 - PRD-aligned client policy schema fields for grant/scope/TTL/secret handling
 - Authorization code schema for hashed one-time PKCE `S256` code exchange
 - `/oauth/authorize` protocol-level validation rejects implicit flow and missing/non-S256 PKCE
+- `/oauth/token` protocol-level validation rejects password grant and checks authorization-code request shape
 
 Major PRD gaps:
-- `/oauth/token`, `/oauth/revoke`, `/oauth/introspect`, `/userinfo`
+- `/oauth/token` DB-backed code exchange, refresh rotation delegation, and client authentication
+- `/oauth/revoke`, `/oauth/introspect`, `/userinfo`
 - `/oauth/authorize` client lookup, login/consent UI, and code issuance
 - Authorization Code + PKCE model and one-time code exchange
 - OIDC `id_token`
