@@ -1,0 +1,270 @@
+use actix_web::{web, HttpResponse};
+use chrono::{Duration, Utc};
+use serde::{Deserialize, Serialize};
+use sqlx::PgPool;
+use uuid::Uuid;
+use validator::Validate;
+
+use crate::{
+    app::AppState,
+    auth::{
+        password::{hash_password, verify_password},
+        token::{hash_refresh_token, issue_access_token, new_refresh_token},
+    },
+    config::Settings,
+    error::AppError,
+};
+
+#[derive(Debug, Deserialize, Validate)]
+pub struct PasswordAuthRequest {
+    #[validate(email)]
+    pub email: String,
+    #[validate(length(min = 12, max = 256))]
+    pub password: String,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct RefreshTokenRequest {
+    pub refresh_token: String,
+}
+
+#[derive(Debug, Serialize)]
+pub struct TokenResponse {
+    pub user_id: Uuid,
+    pub access_token: String,
+    pub refresh_token: String,
+    pub token_type: &'static str,
+    pub expires_in: i64,
+}
+
+#[derive(sqlx::FromRow)]
+struct LoginRow {
+    user_id: Uuid,
+    password_hash: String,
+}
+
+#[derive(sqlx::FromRow)]
+struct RefreshTokenRow {
+    id: Uuid,
+    user_id: Uuid,
+    family_id: Uuid,
+    revoked_at: Option<chrono::DateTime<Utc>>,
+    expires_at: chrono::DateTime<Utc>,
+}
+
+pub async fn register(
+    state: web::Data<AppState>,
+    request: web::Json<PasswordAuthRequest>,
+) -> Result<HttpResponse, AppError> {
+    request.validate().map_err(|_| AppError::Validation)?;
+
+    let user_id = Uuid::new_v4();
+    let normalized_email = request.email.trim().to_lowercase();
+    let password_hash = hash_password(&request.password, &state.settings.password_pepper)
+        .map_err(AppError::Internal)?;
+
+    sqlx::query("INSERT INTO users (id, email) VALUES ($1, $2)")
+        .bind(user_id)
+        .bind(&normalized_email)
+        .execute(&state.pool)
+        .await?;
+
+    sqlx::query("INSERT INTO user_credentials (user_id, password_hash) VALUES ($1, $2)")
+        .bind(user_id)
+        .bind(password_hash)
+        .execute(&state.pool)
+        .await?;
+
+    write_audit_event(&state.pool, Some(user_id), "user_registered").await?;
+    let response = issue_token_pair(&state.pool, &state.settings, user_id, None).await?;
+
+    Ok(HttpResponse::Created().json(response))
+}
+
+pub async fn login(
+    state: web::Data<AppState>,
+    request: web::Json<PasswordAuthRequest>,
+) -> Result<HttpResponse, AppError> {
+    request.validate().map_err(|_| AppError::Validation)?;
+    let normalized_email = request.email.trim().to_lowercase();
+
+    let row = sqlx::query_as::<_, LoginRow>(
+        r#"
+        SELECT users.id AS user_id, user_credentials.password_hash
+        FROM users
+        JOIN user_credentials ON user_credentials.user_id = users.id
+        WHERE users.email = $1 AND users.status = 'active'
+        "#,
+    )
+    .bind(&normalized_email)
+    .fetch_optional(&state.pool)
+    .await?;
+
+    let Some(row) = row else {
+        write_audit_event(&state.pool, None, "login_failed").await?;
+        return Err(AppError::InvalidCredentials);
+    };
+
+    let verified = verify_password(
+        &request.password,
+        &state.settings.password_pepper,
+        &row.password_hash,
+    )
+    .map_err(AppError::Internal)?;
+
+    if !verified {
+        write_audit_event(&state.pool, Some(row.user_id), "login_failed").await?;
+        return Err(AppError::InvalidCredentials);
+    }
+
+    write_audit_event(&state.pool, Some(row.user_id), "login_succeeded").await?;
+    let response = issue_token_pair(&state.pool, &state.settings, row.user_id, None).await?;
+
+    Ok(HttpResponse::Ok().json(response))
+}
+
+pub async fn refresh(
+    state: web::Data<AppState>,
+    request: web::Json<RefreshTokenRequest>,
+) -> Result<HttpResponse, AppError> {
+    let token_hash = hash_refresh_token(&request.refresh_token);
+    let existing = sqlx::query_as::<_, RefreshTokenRow>(
+        r#"
+        SELECT id, user_id, family_id, revoked_at, expires_at
+        FROM refresh_tokens
+        WHERE token_hash = $1
+        "#,
+    )
+    .bind(&token_hash)
+    .fetch_optional(&state.pool)
+    .await?;
+
+    let Some(existing) = existing else {
+        return Err(AppError::Unauthorized);
+    };
+
+    if existing.revoked_at.is_some() {
+        revoke_refresh_family(&state.pool, existing.family_id).await?;
+        write_audit_event(
+            &state.pool,
+            Some(existing.user_id),
+            "refresh_reuse_detected",
+        )
+        .await?;
+        return Err(AppError::Unauthorized);
+    }
+
+    if existing.expires_at <= Utc::now() {
+        return Err(AppError::Unauthorized);
+    }
+
+    let response = issue_token_pair(
+        &state.pool,
+        &state.settings,
+        existing.user_id,
+        Some(existing.family_id),
+    )
+    .await?;
+
+    let new_hash = hash_refresh_token(&response.refresh_token);
+    let replacement_id =
+        sqlx::query_scalar::<_, Uuid>("SELECT id FROM refresh_tokens WHERE token_hash = $1")
+            .bind(&new_hash)
+            .fetch_one(&state.pool)
+            .await?;
+
+    sqlx::query("UPDATE refresh_tokens SET revoked_at = now(), replaced_by = $1 WHERE id = $2")
+        .bind(replacement_id)
+        .bind(existing.id)
+        .execute(&state.pool)
+        .await?;
+
+    write_audit_event(&state.pool, Some(existing.user_id), "refresh_rotated").await?;
+    Ok(HttpResponse::Ok().json(response))
+}
+
+pub async fn logout(
+    state: web::Data<AppState>,
+    request: web::Json<RefreshTokenRequest>,
+) -> Result<HttpResponse, AppError> {
+    let token_hash = hash_refresh_token(&request.refresh_token);
+    sqlx::query(
+        "UPDATE refresh_tokens SET revoked_at = now() WHERE token_hash = $1 AND revoked_at IS NULL",
+    )
+    .bind(token_hash)
+    .execute(&state.pool)
+    .await?;
+
+    Ok(HttpResponse::NoContent().finish())
+}
+
+async fn issue_token_pair(
+    pool: &PgPool,
+    settings: &Settings,
+    user_id: Uuid,
+    family_id: Option<Uuid>,
+) -> Result<TokenResponse, AppError> {
+    let (access_token, expires_in) =
+        issue_access_token(settings, user_id).map_err(AppError::Internal)?;
+    let refresh_token = new_refresh_token();
+    let refresh_token_hash = hash_refresh_token(&refresh_token);
+    let refresh_token_id = Uuid::new_v4();
+    let family_id = family_id.unwrap_or_else(Uuid::new_v4);
+    let expires_at = Utc::now() + Duration::seconds(settings.jwt_refresh_token_ttl_seconds);
+
+    sqlx::query(
+        r#"
+        INSERT INTO refresh_tokens (id, user_id, token_hash, family_id, expires_at)
+        VALUES ($1, $2, $3, $4, $5)
+        "#,
+    )
+    .bind(refresh_token_id)
+    .bind(user_id)
+    .bind(refresh_token_hash)
+    .bind(family_id)
+    .bind(expires_at)
+    .execute(pool)
+    .await?;
+
+    Ok(TokenResponse {
+        user_id,
+        access_token,
+        refresh_token,
+        token_type: "Bearer",
+        expires_in,
+    })
+}
+
+async fn revoke_refresh_family(pool: &PgPool, family_id: Uuid) -> Result<(), AppError> {
+    sqlx::query(
+        "UPDATE refresh_tokens SET revoked_at = now() WHERE family_id = $1 AND revoked_at IS NULL",
+    )
+    .bind(family_id)
+    .execute(pool)
+    .await?;
+    Ok(())
+}
+
+async fn write_audit_event(
+    pool: &PgPool,
+    user_id: Option<Uuid>,
+    event_type: &str,
+) -> Result<(), AppError> {
+    sqlx::query("INSERT INTO audit_events (id, user_id, event_type) VALUES ($1, $2, $3)")
+        .bind(Uuid::new_v4())
+        .bind(user_id)
+        .bind(event_type)
+        .execute(pool)
+        .await?;
+    Ok(())
+}
+
+pub fn configure(cfg: &mut web::ServiceConfig) {
+    cfg.service(
+        web::scope("/v1/auth")
+            .route("/password/register", web::post().to(register))
+            .route("/password/login", web::post().to(login))
+            .route("/token/refresh", web::post().to(refresh))
+            .route("/logout", web::post().to(logout)),
+    );
+}
