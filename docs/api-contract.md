@@ -56,7 +56,7 @@ Status: implemented for protocol-level request validation; DB-backed token revoc
 
 ### POST /oauth/introspect
 
-Status: planned. RFC 7662 token introspection for confidential clients.
+Status: implemented for protocol-level request validation; DB/JWT-backed active token inspection for confidential clients is planned. RFC 7662 token introspection for confidential clients.
 
 ### GET /userinfo
 
