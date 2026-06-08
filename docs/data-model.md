@@ -54,6 +54,19 @@ clients
 - created_at timestamptz
 - updated_at timestamptz
 
+authorization_codes
+- id uuid pk
+- code_hash text unique
+- client_id uuid fk clients.id
+- user_id uuid fk users.id
+- redirect_uri text
+- code_challenge text
+- code_challenge_method text (`S256` only)
+- scope text[]
+- expires_at timestamptz
+- consumed_at timestamptz null
+- created_at timestamptz
+
 audit_events
 - id uuid pk
 - user_id uuid null
@@ -70,4 +83,5 @@ audit_events
 - refresh token 원문은 저장하지 않는다.
 - client secret은 `client_secret_hash`에만 저장하고 public client는 secret을 가질 수 없다.
 - client별 허용 grant/scope 및 token TTL override를 `clients`에서 관리한다.
+- authorization code 원문은 저장하지 않고 hash만 저장하며 `S256` PKCE와 1회성 소비를 강제한다.
 - social identity는 provider별 immutable external id 기준으로 연결한다.
