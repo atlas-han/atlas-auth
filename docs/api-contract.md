@@ -52,7 +52,7 @@ Supports:
 
 ### POST /oauth/revoke
 
-Status: planned. RFC 7009 token revocation.
+Status: implemented for protocol-level request validation; DB-backed token revocation is planned. RFC 7009 token revocation.
 
 ### POST /oauth/introspect
 

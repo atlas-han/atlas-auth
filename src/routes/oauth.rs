@@ -29,6 +29,12 @@ struct TokenForm {
     scope: Option<String>,
 }
 
+#[derive(Debug, Deserialize)]
+struct RevokeForm {
+    token: Option<String>,
+    token_type_hint: Option<String>,
+}
+
 #[derive(Debug, Serialize)]
 struct AuthorizeValidationResponse {
     status: &'static str,
@@ -77,6 +83,34 @@ async fn token(form: web::Form<TokenForm>) -> HttpResponse {
         Err((error, message)) => {
             HttpResponse::BadRequest().json(OAuthErrorResponse { error, message })
         }
+    }
+}
+
+#[post("/oauth/revoke")]
+async fn revoke(form: web::Form<RevokeForm>) -> HttpResponse {
+    match validate_revoke_form(&form) {
+        Ok(()) => HttpResponse::Ok().finish(),
+        Err((error, message)) => {
+            HttpResponse::BadRequest().json(OAuthErrorResponse { error, message })
+        }
+    }
+}
+
+fn validate_revoke_form(form: &RevokeForm) -> Result<(), (&'static str, &'static str)> {
+    let has_token = form
+        .token
+        .as_deref()
+        .is_some_and(|value| !value.trim().is_empty());
+    if !has_token {
+        return Err(("invalid_request", "token is required"));
+    }
+
+    match form.token_type_hint.as_deref() {
+        None | Some("") | Some("access_token") | Some("refresh_token") => Ok(()),
+        Some(_) => Err((
+            "unsupported_token_type",
+            "token_type_hint must be access_token or refresh_token",
+        )),
     }
 }
 
@@ -166,5 +200,5 @@ fn validate_authorize_query(query: &AuthorizeQuery) -> Result<(), &'static str> 
 }
 
 pub fn configure(cfg: &mut web::ServiceConfig) {
-    cfg.service(authorize).service(token);
+    cfg.service(authorize).service(token).service(revoke);
 }
