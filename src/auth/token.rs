@@ -1,5 +1,5 @@
 use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine as _};
-use chrono::{Duration, Utc};
+use chrono::{DateTime, Duration, Utc};
 use jsonwebtoken::{encode, Algorithm, EncodingKey, Header};
 use rand::{distributions::Alphanumeric, Rng};
 use rsa::{pkcs8::DecodePublicKey, traits::PublicKeyParts, RsaPublicKey};
@@ -91,6 +91,55 @@ pub fn hash_refresh_token(refresh_token: &str) -> String {
     hex::encode(digest)
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct StoredRefreshToken {
+    pub token_hash: String,
+    pub family_id: Uuid,
+    pub revoked: bool,
+    pub expires_at: DateTime<Utc>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RotatedRefreshToken {
+    pub plaintext: String,
+    pub token_hash: String,
+    pub family_id: Uuid,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RefreshTokenRotationError {
+    InvalidToken,
+    Expired,
+    ReuseDetected,
+}
+
+pub fn rotate_refresh_token(
+    current: &StoredRefreshToken,
+    presented_plaintext: &str,
+    now: DateTime<Utc>,
+) -> Result<RotatedRefreshToken, RefreshTokenRotationError> {
+    if current.token_hash != hash_refresh_token(presented_plaintext) {
+        return Err(RefreshTokenRotationError::InvalidToken);
+    }
+
+    if current.revoked {
+        return Err(RefreshTokenRotationError::ReuseDetected);
+    }
+
+    if current.expires_at <= now {
+        return Err(RefreshTokenRotationError::Expired);
+    }
+
+    let plaintext = new_refresh_token();
+    let token_hash = hash_refresh_token(&plaintext);
+
+    Ok(RotatedRefreshToken {
+        plaintext,
+        token_hash,
+        family_id: current.family_id,
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -110,6 +159,52 @@ mod tests {
         let token = new_refresh_token();
 
         assert!(token.len() >= 96);
+    }
+
+    #[test]
+    fn refresh_token_rotation_allows_active_token_and_preserves_family() {
+        let family_id = Uuid::new_v4();
+        let current = StoredRefreshToken {
+            token_hash: hash_refresh_token("current-refresh-token"),
+            family_id,
+            revoked: false,
+            expires_at: Utc::now() + Duration::days(14),
+        };
+
+        let rotated = rotate_refresh_token(&current, "current-refresh-token", Utc::now())
+            .expect("active refresh token should rotate");
+
+        assert_eq!(rotated.family_id, family_id);
+        assert_ne!(rotated.plaintext, "current-refresh-token");
+        assert_ne!(rotated.token_hash, current.token_hash);
+    }
+
+    #[test]
+    fn refresh_token_rotation_detects_reuse_of_revoked_token() {
+        let current = StoredRefreshToken {
+            token_hash: hash_refresh_token("current-refresh-token"),
+            family_id: Uuid::new_v4(),
+            revoked: true,
+            expires_at: Utc::now() + Duration::days(14),
+        };
+
+        let result = rotate_refresh_token(&current, "current-refresh-token", Utc::now());
+
+        assert_eq!(result, Err(RefreshTokenRotationError::ReuseDetected));
+    }
+
+    #[test]
+    fn refresh_token_rotation_rejects_expired_token() {
+        let current = StoredRefreshToken {
+            token_hash: hash_refresh_token("current-refresh-token"),
+            family_id: Uuid::new_v4(),
+            revoked: false,
+            expires_at: Utc::now() - Duration::seconds(1),
+        };
+
+        let result = rotate_refresh_token(&current, "current-refresh-token", Utc::now());
+
+        assert_eq!(result, Err(RefreshTokenRotationError::Expired));
     }
 
     #[test]
