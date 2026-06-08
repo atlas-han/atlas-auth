@@ -22,6 +22,7 @@ Implemented:
 - `/.well-known/openid-configuration` discovery endpoint
 - RS256 access token signing with `kid`, `jti`, and `scope` claims
 - `/.well-known/jwks.json` JWKS endpoint for active public signing key
+- PRD-aligned client policy schema fields for grant/scope/TTL/secret handling
 
 Major PRD gaps:
 - `/oauth/authorize`, `/oauth/token`, `/oauth/revoke`, `/oauth/introspect`, `/userinfo`
