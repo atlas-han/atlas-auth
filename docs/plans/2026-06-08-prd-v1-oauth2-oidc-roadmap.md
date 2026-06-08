@@ -24,9 +24,11 @@ Implemented:
 - `/.well-known/jwks.json` JWKS endpoint for active public signing key
 - PRD-aligned client policy schema fields for grant/scope/TTL/secret handling
 - Authorization code schema for hashed one-time PKCE `S256` code exchange
+- `/oauth/authorize` protocol-level validation rejects implicit flow and missing/non-S256 PKCE
 
 Major PRD gaps:
-- `/oauth/authorize`, `/oauth/token`, `/oauth/revoke`, `/oauth/introspect`, `/userinfo`
+- `/oauth/token`, `/oauth/revoke`, `/oauth/introspect`, `/userinfo`
+- `/oauth/authorize` client lookup, login/consent UI, and code issuance
 - Authorization Code + PKCE model and one-time code exchange
 - OIDC `id_token`
 - Client Credentials grant

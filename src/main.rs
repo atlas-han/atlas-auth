@@ -24,6 +24,7 @@ async fn main() -> anyhow::Result<()> {
             .app_data(web::Data::new(state.clone()))
             .configure(routes::health::configure)
             .configure(routes::auth::configure)
+            .configure(routes::oauth::configure)
             .configure(routes::oidc::configure)
     })
     .bind(socket_addr)?

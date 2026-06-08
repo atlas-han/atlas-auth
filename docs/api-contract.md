@@ -37,7 +37,7 @@ Publishes active RS256 public signing keys. Private key material must never be e
 
 ### GET /oauth/authorize
 
-Status: planned.
+Status: implemented for protocol-level request validation; client lookup, login/consent UI, and code issuance are planned.
 
 Authorization Code + PKCE entrypoint. Supports `response_type=code`, `client_id`, exact-match `redirect_uri`, `scope`, `state`, `code_challenge`, and `code_challenge_method=S256`.
 
