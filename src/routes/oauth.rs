@@ -4,7 +4,10 @@ use serde::{Deserialize, Serialize};
 
 use crate::{
     app::AppState,
-    auth::token::{hash_refresh_token, issue_access_token, new_refresh_token},
+    auth::token::{
+        hash_refresh_token, issue_access_token, new_refresh_token, rotate_refresh_token,
+        StoredRefreshToken,
+    },
     oauth::{
         authorization_code::{
             exchange_authorization_code, hash_authorization_code, AuthorizationCodeRepository,
@@ -161,17 +164,33 @@ async fn token(
             Some(authorization_code_repository),
             Some(refresh_token_repository),
         ) = (
-            state,
-            client_repository,
-            authorization_code_repository,
-            refresh_token_repository,
+            state.as_ref(),
+            client_repository.as_ref(),
+            authorization_code_repository.as_ref(),
+            refresh_token_repository.as_ref(),
         ) {
             return exchange_authorization_code_grant(
                 &form,
-                &state,
-                &client_repository,
-                &authorization_code_repository,
-                &refresh_token_repository,
+                state,
+                client_repository,
+                authorization_code_repository,
+                refresh_token_repository,
+            )
+            .await;
+        }
+    }
+
+    if form.grant_type == "refresh_token" {
+        if let (Some(state), Some(client_repository), Some(refresh_token_repository)) = (
+            state.as_ref(),
+            client_repository.as_ref(),
+            refresh_token_repository.as_ref(),
+        ) {
+            return exchange_refresh_token_grant(
+                &form,
+                state,
+                client_repository,
+                refresh_token_repository,
             )
             .await;
         }
@@ -294,6 +313,133 @@ async fn exchange_authorization_code_grant(
     HttpResponse::Ok().json(TokenResponse {
         access_token,
         refresh_token,
+        token_type: "Bearer",
+        expires_in,
+        scope,
+    })
+}
+
+async fn exchange_refresh_token_grant(
+    form: &TokenForm,
+    state: &AppState,
+    client_repository: &OAuthClientRepository,
+    refresh_token_repository: &RefreshTokenRepository,
+) -> HttpResponse {
+    let client_id = match form.client_id.as_deref() {
+        Some(client_id) if !client_id.trim().is_empty() => client_id,
+        _ => {
+            return HttpResponse::BadRequest().json(OAuthErrorResponse {
+                error: "invalid_request",
+                message: "client_id is required",
+            })
+        }
+    };
+    let client_record = match client_repository
+        .find_active_by_public_client_id(client_id)
+        .await
+    {
+        Ok(Some(client_record)) => client_record,
+        Ok(None) => {
+            return HttpResponse::BadRequest().json(OAuthErrorResponse {
+                error: "invalid_client",
+                message: "Client is not registered or active",
+            })
+        }
+        Err(_) => {
+            return HttpResponse::InternalServerError().json(OAuthErrorResponse {
+                error: "server_error",
+                message: "Client lookup failed",
+            })
+        }
+    };
+
+    let presented_refresh_token = form.refresh_token.as_deref().unwrap_or_default();
+    let presented_hash = hash_refresh_token(presented_refresh_token);
+    let stored_record = match refresh_token_repository.find_by_hash(&presented_hash).await {
+        Ok(Some(stored_record)) => stored_record,
+        Ok(None) => {
+            return HttpResponse::BadRequest().json(OAuthErrorResponse {
+                error: "invalid_grant",
+                message: "refresh token is invalid",
+            })
+        }
+        Err(_) => {
+            return HttpResponse::InternalServerError().json(OAuthErrorResponse {
+                error: "server_error",
+                message: "Refresh token lookup failed",
+            })
+        }
+    };
+
+    if stored_record.client_id != client_record.id {
+        return HttpResponse::BadRequest().json(OAuthErrorResponse {
+            error: "invalid_grant",
+            message: "refresh token does not belong to this client",
+        });
+    }
+
+    let stored_token = StoredRefreshToken {
+        token_hash: stored_record.token_hash.clone(),
+        family_id: stored_record.family_id,
+        revoked: stored_record.revoked,
+        expires_at: stored_record.expires_at,
+    };
+    let rotated = match rotate_refresh_token(&stored_token, presented_refresh_token, Utc::now()) {
+        Ok(rotated) => rotated,
+        Err(_) => {
+            return HttpResponse::BadRequest().json(OAuthErrorResponse {
+                error: "invalid_grant",
+                message: "refresh token is invalid, expired, or already used",
+            })
+        }
+    };
+
+    let scope = stored_record.scope.join(" ");
+    let (access_token, expires_in) =
+        match issue_access_token(&state.settings, stored_record.user_id, &scope) {
+            Ok(issued_token) => issued_token,
+            Err(_) => {
+                return HttpResponse::InternalServerError().json(OAuthErrorResponse {
+                    error: "server_error",
+                    message: "Access token issuance failed",
+                })
+            }
+        };
+
+    if refresh_token_repository
+        .save(NewRefreshToken {
+            id: uuid::Uuid::new_v4(),
+            user_id: stored_record.user_id,
+            client_id: stored_record.client_id,
+            token_hash: rotated.token_hash,
+            family_id: rotated.family_id,
+            scope: stored_record.scope.clone(),
+            expires_at: Utc::now()
+                + Duration::seconds(state.settings.jwt_refresh_token_ttl_seconds),
+        })
+        .await
+        .is_err()
+    {
+        return HttpResponse::InternalServerError().json(OAuthErrorResponse {
+            error: "server_error",
+            message: "Refresh token persistence failed",
+        });
+    }
+
+    if refresh_token_repository
+        .revoke_by_hash(&presented_hash)
+        .await
+        .is_err()
+    {
+        return HttpResponse::InternalServerError().json(OAuthErrorResponse {
+            error: "server_error",
+            message: "Refresh token revocation failed",
+        });
+    }
+
+    HttpResponse::Ok().json(TokenResponse {
+        access_token,
+        refresh_token: rotated.plaintext,
         token_type: "Bearer",
         expires_in,
         scope,

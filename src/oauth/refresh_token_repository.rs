@@ -116,4 +116,34 @@ impl RefreshTokenRepository {
                 .cloned()),
         }
     }
+
+    pub async fn revoke_by_hash(&self, token_hash: &str) -> Result<(), sqlx::Error> {
+        match self {
+            Self::Postgres(pool) => {
+                sqlx::query(
+                    r#"
+                        UPDATE refresh_tokens
+                        SET revoked_at = now()
+                        WHERE token_hash = $1
+                          AND revoked_at IS NULL
+                    "#,
+                )
+                .bind(token_hash)
+                .execute(pool)
+                .await?;
+                Ok(())
+            }
+            Self::InMemory(tokens) => {
+                if let Some(token) = tokens
+                    .lock()
+                    .expect("refresh token store poisoned")
+                    .iter_mut()
+                    .find(|token| token.token_hash == token_hash)
+                {
+                    token.revoked = true;
+                }
+                Ok(())
+            }
+        }
+    }
 }
