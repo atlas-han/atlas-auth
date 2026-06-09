@@ -8,6 +8,7 @@ use validator::Validate;
 use crate::{
     app::AppState,
     auth::{
+        login_attempt_repository::LoginAttemptRepository,
         password::{hash_password, verify_password},
         token::{hash_refresh_token, issue_access_token, new_refresh_token},
     },
@@ -82,11 +83,21 @@ pub async fn register(
 }
 
 pub async fn login(
-    state: web::Data<AppState>,
+    state: Option<web::Data<AppState>>,
+    login_attempts: Option<web::Data<LoginAttemptRepository>>,
     request: web::Json<PasswordAuthRequest>,
 ) -> Result<HttpResponse, AppError> {
     request.validate().map_err(|_| AppError::Validation)?;
     let normalized_email = request.email.trim().to_lowercase();
+
+    if let Some(login_attempts) = login_attempts.as_ref() {
+        let status = login_attempts.status(&normalized_email, Utc::now()).await?;
+        if status.locked {
+            return Err(AppError::AccountLocked);
+        }
+    }
+
+    let state = state.ok_or_else(|| AppError::Internal(anyhow::anyhow!("app state missing")))?;
 
     let row = sqlx::query_as::<_, LoginRow>(
         r#"
@@ -101,6 +112,11 @@ pub async fn login(
     .await?;
 
     let Some(row) = row else {
+        if let Some(login_attempts) = login_attempts.as_ref() {
+            login_attempts
+                .record_failure(&normalized_email, 5, Duration::minutes(15), Utc::now())
+                .await?;
+        }
         write_audit_event(&state.pool, None, "login_failed").await?;
         return Err(AppError::InvalidCredentials);
     };
@@ -113,10 +129,18 @@ pub async fn login(
     .map_err(AppError::Internal)?;
 
     if !verified {
+        if let Some(login_attempts) = login_attempts.as_ref() {
+            login_attempts
+                .record_failure(&normalized_email, 5, Duration::minutes(15), Utc::now())
+                .await?;
+        }
         write_audit_event(&state.pool, Some(row.user_id), "login_failed").await?;
         return Err(AppError::InvalidCredentials);
     }
 
+    if let Some(login_attempts) = login_attempts.as_ref() {
+        login_attempts.clear(&normalized_email).await?;
+    }
     write_audit_event(&state.pool, Some(row.user_id), "login_succeeded").await?;
     let response = issue_token_pair(&state.pool, &state.settings, row.user_id, None).await?;
 

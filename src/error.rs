@@ -12,6 +12,8 @@ pub enum AppError {
     Conflict,
     #[error("unauthorized")]
     Unauthorized,
+    #[error("account_locked")]
+    AccountLocked,
     #[error("internal_error")]
     Internal(#[from] anyhow::Error),
 }
@@ -29,6 +31,7 @@ impl ResponseError for AppError {
             AppError::InvalidCredentials => StatusCode::UNAUTHORIZED,
             AppError::Conflict => StatusCode::CONFLICT,
             AppError::Unauthorized => StatusCode::UNAUTHORIZED,
+            AppError::AccountLocked => StatusCode::TOO_MANY_REQUESTS,
             AppError::Internal(_) => StatusCode::INTERNAL_SERVER_ERROR,
         }
     }
@@ -39,6 +42,7 @@ impl ResponseError for AppError {
             AppError::InvalidCredentials => ("invalid_credentials", "Invalid email or password"),
             AppError::Conflict => ("conflict", "Resource already exists"),
             AppError::Unauthorized => ("unauthorized", "Authentication is required"),
+            AppError::AccountLocked => ("account_locked", "Account is temporarily locked"),
             AppError::Internal(_) => ("internal_error", "Internal server error"),
         };
 
