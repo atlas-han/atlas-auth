@@ -1,6 +1,7 @@
 use actix_web::{test, web, App};
 use atlas_auth::{
     app::AppState,
+    auth::token::IdTokenClaims,
     config::Settings,
     oauth::{
         authorization_code::{
@@ -12,6 +13,7 @@ use atlas_auth::{
     },
     routes,
 };
+use jsonwebtoken::{decode, Algorithm, DecodingKey, Validation};
 use serde_json::Value;
 use sqlx::postgres::PgPoolOptions;
 use uuid::Uuid;
@@ -93,9 +95,11 @@ async fn token_exchanges_authorization_code_with_pkce_and_consumes_code() {
         .unwrap();
     let clients = OAuthClientRepository::in_memory(vec![client_record(client_uuid)]);
     let refresh_tokens = RefreshTokenRepository::in_memory();
+    let state = test_state();
+    let public_key = state.settings.jwt_public_key_pem.clone();
     let app = test::init_service(
         App::new()
-            .app_data(web::Data::new(test_state()))
+            .app_data(web::Data::new(state))
             .app_data(web::Data::new(clients))
             .app_data(web::Data::new(authorization_codes.clone()))
             .app_data(web::Data::new(refresh_tokens.clone()))
@@ -122,6 +126,21 @@ async fn token_exchanges_authorization_code_with_pkce_and_consumes_code() {
     assert_eq!(body["expires_in"], 900);
     assert_eq!(body["scope"], "openid email");
     assert!(body["access_token"].as_str().unwrap().len() > 100);
+    let id_token = body["id_token"]
+        .as_str()
+        .expect("openid authorization_code exchange should issue an id_token");
+    let mut validation = Validation::new(Algorithm::RS256);
+    validation.set_audience(&["client-1"]);
+    validation.set_issuer(&["https://auth.example.test"]);
+    let decoded_id_token = decode::<IdTokenClaims>(
+        id_token,
+        &DecodingKey::from_rsa_pem(public_key.as_bytes()).expect("public key should parse"),
+        &validation,
+    )
+    .expect("id_token should verify with public key");
+    assert_eq!(decoded_id_token.claims.sub, user_uuid.to_string());
+    assert_eq!(decoded_id_token.claims.aud, "client-1");
+    assert!(!decoded_id_token.claims.jti.is_empty());
     let refresh_token = body["refresh_token"]
         .as_str()
         .expect("authorization_code exchange should issue refresh token");

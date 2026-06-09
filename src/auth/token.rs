@@ -20,6 +20,16 @@ pub struct Claims {
     pub jti: String,
 }
 
+#[derive(Debug, Serialize, Deserialize)]
+pub struct IdTokenClaims {
+    pub sub: String,
+    pub iss: String,
+    pub aud: String,
+    pub iat: i64,
+    pub exp: i64,
+    pub jti: String,
+}
+
 #[derive(Debug, Serialize)]
 pub struct Jwks {
     pub keys: Vec<Jwk>,
@@ -61,15 +71,40 @@ pub fn issue_access_token_for_subject(
         jti: Uuid::new_v4().to_string(),
     };
 
-    let mut header = Header::new(Algorithm::RS256);
-    header.kid = Some(settings.jwt_signing_key_id.clone());
-    let token = encode(
-        &header,
-        &claims,
-        &EncodingKey::from_rsa_pem(settings.jwt_private_key_pem.as_bytes())?,
-    )?;
+    let token = encode_rs256(settings, &claims)?;
 
     Ok((token, settings.jwt_access_token_ttl_seconds))
+}
+
+pub fn issue_id_token(
+    settings: &Settings,
+    user_id: Uuid,
+    audience: &str,
+) -> anyhow::Result<(String, i64)> {
+    let now = Utc::now();
+    let exp = now + Duration::seconds(settings.jwt_access_token_ttl_seconds);
+    let claims = IdTokenClaims {
+        sub: user_id.to_string(),
+        iss: settings.jwt_issuer.clone(),
+        aud: audience.to_string(),
+        iat: now.timestamp(),
+        exp: exp.timestamp(),
+        jti: Uuid::new_v4().to_string(),
+    };
+
+    let token = encode_rs256(settings, &claims)?;
+
+    Ok((token, settings.jwt_access_token_ttl_seconds))
+}
+
+fn encode_rs256<T: Serialize>(settings: &Settings, claims: &T) -> anyhow::Result<String> {
+    let mut header = Header::new(Algorithm::RS256);
+    header.kid = Some(settings.jwt_signing_key_id.clone());
+    Ok(encode(
+        &header,
+        claims,
+        &EncodingKey::from_rsa_pem(settings.jwt_private_key_pem.as_bytes())?,
+    )?)
 }
 
 pub fn public_jwks(settings: &Settings) -> anyhow::Result<Jwks> {

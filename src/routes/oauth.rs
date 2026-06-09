@@ -5,8 +5,8 @@ use serde::{Deserialize, Serialize};
 use crate::{
     app::AppState,
     auth::token::{
-        hash_refresh_token, issue_access_token, issue_access_token_for_subject, new_refresh_token,
-        rotate_refresh_token, StoredRefreshToken,
+        hash_refresh_token, issue_access_token, issue_access_token_for_subject, issue_id_token,
+        new_refresh_token, rotate_refresh_token, StoredRefreshToken,
     },
     oauth::{
         authorization_code::{
@@ -92,6 +92,8 @@ struct TokenValidationResponse {
 struct TokenResponse {
     access_token: String,
     refresh_token: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    id_token: Option<String>,
     token_type: &'static str,
     expires_in: i64,
     scope: String,
@@ -394,9 +396,28 @@ async fn exchange_authorization_code_grant(
         });
     }
 
+    let id_token = if stored_code.scope.iter().any(|scope| scope == "openid") {
+        match issue_id_token(
+            &state.settings,
+            stored_code.user_id,
+            &client_record.public_client_id,
+        ) {
+            Ok((id_token, _)) => Some(id_token),
+            Err(_) => {
+                return HttpResponse::InternalServerError().json(OAuthErrorResponse {
+                    error: "server_error",
+                    message: "ID token issuance failed",
+                })
+            }
+        }
+    } else {
+        None
+    };
+
     HttpResponse::Ok().json(TokenResponse {
         access_token,
         refresh_token,
+        id_token,
         token_type: "Bearer",
         expires_in,
         scope,
@@ -536,6 +557,7 @@ async fn exchange_refresh_token_grant(
     HttpResponse::Ok().json(TokenResponse {
         access_token,
         refresh_token: rotated.plaintext,
+        id_token: None,
         token_type: "Bearer",
         expires_in,
         scope,
