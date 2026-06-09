@@ -1,6 +1,12 @@
 use actix_web::{middleware::Logger, web, App, HttpServer};
 use atlas_auth::{
-    app::AppState, config::Settings, db, oauth::client_repository::OAuthClientRepository, routes,
+    app::AppState,
+    config::Settings,
+    db,
+    oauth::{
+        authorization_code::AuthorizationCodeRepository, client_repository::OAuthClientRepository,
+    },
+    routes,
 };
 use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
 
@@ -17,6 +23,7 @@ async fn main() -> anyhow::Result<()> {
     let socket_addr = settings.socket_addr()?;
     let pool = db::connect(&settings.database_url).await?;
     let client_repository = OAuthClientRepository::postgres(pool.clone());
+    let authorization_code_repository = AuthorizationCodeRepository::postgres(pool.clone());
     let state = AppState { pool, settings };
 
     tracing::info!(%socket_addr, "starting atlas-auth");
@@ -26,6 +33,7 @@ async fn main() -> anyhow::Result<()> {
             .wrap(Logger::default())
             .app_data(web::Data::new(state.clone()))
             .app_data(web::Data::new(client_repository.clone()))
+            .app_data(web::Data::new(authorization_code_repository.clone()))
             .configure(routes::health::configure)
             .configure(routes::auth::configure)
             .configure(routes::oauth::configure)

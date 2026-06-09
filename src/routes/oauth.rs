@@ -1,9 +1,17 @@
 use actix_web::{get, post, web, HttpResponse};
+use chrono::Utc;
 use serde::{Deserialize, Serialize};
 
-use crate::oauth::{
-    client::{parse_scope, validate_authorize_client},
-    client_repository::OAuthClientRepository,
+use crate::{
+    app::AppState,
+    auth::token::issue_access_token,
+    oauth::{
+        authorization_code::{
+            exchange_authorization_code, hash_authorization_code, AuthorizationCodeRepository,
+        },
+        client::{parse_scope, validate_authorize_client},
+        client_repository::OAuthClientRepository,
+    },
 };
 
 #[derive(Debug, Deserialize)]
@@ -69,6 +77,14 @@ struct TokenValidationResponse {
     client_id: String,
 }
 
+#[derive(Debug, Serialize)]
+struct TokenResponse {
+    access_token: String,
+    token_type: &'static str,
+    expires_in: i64,
+    scope: String,
+}
+
 #[get("/oauth/authorize")]
 async fn authorize(
     query: web::Query<AuthorizeQuery>,
@@ -125,17 +141,127 @@ async fn authorize(
 }
 
 #[post("/oauth/token")]
-async fn token(form: web::Form<TokenForm>) -> HttpResponse {
-    match validate_token_form(&form) {
-        Ok(()) => HttpResponse::Ok().json(TokenValidationResponse {
-            status: "validated",
-            grant_type: form.grant_type.clone(),
-            client_id: form.client_id.clone().unwrap_or_default(),
-        }),
-        Err((error, message)) => {
-            HttpResponse::BadRequest().json(OAuthErrorResponse { error, message })
+async fn token(
+    form: web::Form<TokenForm>,
+    state: Option<web::Data<AppState>>,
+    client_repository: Option<web::Data<OAuthClientRepository>>,
+    authorization_code_repository: Option<web::Data<AuthorizationCodeRepository>>,
+) -> HttpResponse {
+    if let Err((error, message)) = validate_token_form(&form) {
+        return HttpResponse::BadRequest().json(OAuthErrorResponse { error, message });
+    }
+
+    if form.grant_type == "authorization_code" {
+        if let (Some(state), Some(client_repository), Some(authorization_code_repository)) =
+            (state, client_repository, authorization_code_repository)
+        {
+            return exchange_authorization_code_grant(
+                &form,
+                &state,
+                &client_repository,
+                &authorization_code_repository,
+            )
+            .await;
         }
     }
+
+    HttpResponse::Ok().json(TokenValidationResponse {
+        status: "validated",
+        grant_type: form.grant_type.clone(),
+        client_id: form.client_id.clone().unwrap_or_default(),
+    })
+}
+
+async fn exchange_authorization_code_grant(
+    form: &TokenForm,
+    state: &AppState,
+    client_repository: &OAuthClientRepository,
+    authorization_code_repository: &AuthorizationCodeRepository,
+) -> HttpResponse {
+    let client_id = form.client_id.as_deref().unwrap_or_default();
+    let client_record = match client_repository
+        .find_active_by_public_client_id(client_id)
+        .await
+    {
+        Ok(Some(client_record)) => client_record,
+        Ok(None) => {
+            return HttpResponse::BadRequest().json(OAuthErrorResponse {
+                error: "invalid_client",
+                message: "Client is not registered or active",
+            })
+        }
+        Err(_) => {
+            return HttpResponse::InternalServerError().json(OAuthErrorResponse {
+                error: "server_error",
+                message: "Client lookup failed",
+            })
+        }
+    };
+
+    let code = form.code.as_deref().unwrap_or_default();
+    let code_hash = hash_authorization_code(code);
+    let stored_code = match authorization_code_repository
+        .find_unconsumed_by_hash(&code_hash, Utc::now())
+        .await
+    {
+        Ok(Some(stored_code)) => stored_code,
+        Ok(None) => {
+            return HttpResponse::BadRequest().json(OAuthErrorResponse {
+                error: "invalid_grant",
+                message: "authorization code is invalid, expired, or already consumed",
+            })
+        }
+        Err(_) => {
+            return HttpResponse::InternalServerError().json(OAuthErrorResponse {
+                error: "server_error",
+                message: "Authorization code lookup failed",
+            })
+        }
+    };
+
+    if let Err(message) = exchange_authorization_code(
+        &stored_code,
+        code,
+        form.code_verifier.as_deref().unwrap_or_default(),
+        form.redirect_uri.as_deref().unwrap_or_default(),
+        client_record.id,
+        Utc::now(),
+    ) {
+        return HttpResponse::BadRequest().json(OAuthErrorResponse {
+            error: "invalid_grant",
+            message,
+        });
+    }
+
+    let scope = stored_code.scope.join(" ");
+    let (access_token, expires_in) =
+        match issue_access_token(&state.settings, stored_code.user_id, &scope) {
+            Ok(issued_token) => issued_token,
+            Err(_) => {
+                return HttpResponse::InternalServerError().json(OAuthErrorResponse {
+                    error: "server_error",
+                    message: "Access token issuance failed",
+                })
+            }
+        };
+
+    if authorization_code_repository
+        .consume(&code_hash)
+        .await
+        .is_err()
+    {
+        return HttpResponse::InternalServerError().json(OAuthErrorResponse {
+            error: "server_error",
+            message: "Authorization code consumption failed",
+        });
+    }
+
+    HttpResponse::Ok().json(TokenResponse {
+        access_token,
+        token_type: "Bearer",
+        expires_in,
+        scope,
+    })
 }
 
 #[post("/oauth/revoke")]
