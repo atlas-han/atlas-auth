@@ -8,6 +8,7 @@ use validator::Validate;
 use crate::{
     app::AppState,
     auth::{
+        account_recovery_repository::{AccountRecoveryRepository, AccountTokenPurpose},
         login_attempt_repository::LoginAttemptRepository,
         password::{hash_password, verify_password},
         token::{hash_refresh_token, issue_access_token, new_refresh_token},
@@ -27,6 +28,20 @@ pub struct PasswordAuthRequest {
 #[derive(Debug, Deserialize)]
 pub struct RefreshTokenRequest {
     pub refresh_token: String,
+}
+
+#[derive(Debug, Deserialize, Validate)]
+pub struct TokenOnlyRequest {
+    #[validate(length(min = 1, max = 512))]
+    pub token: String,
+}
+
+#[derive(Debug, Deserialize, Validate)]
+pub struct PasswordResetRequest {
+    #[validate(length(min = 1, max = 512))]
+    pub token: String,
+    #[validate(length(min = 12, max = 256))]
+    pub new_password: String,
 }
 
 #[derive(Debug, Serialize)]
@@ -222,6 +237,71 @@ pub async fn logout(
     Ok(HttpResponse::NoContent().finish())
 }
 
+pub async fn verify_email(
+    state: Option<web::Data<AppState>>,
+    account_recovery: web::Data<AccountRecoveryRepository>,
+    request: web::Json<TokenOnlyRequest>,
+) -> Result<HttpResponse, AppError> {
+    request.validate().map_err(|_| AppError::Validation)?;
+    let token_hash = hash_refresh_token(&request.token);
+    let now = Utc::now();
+    let Some(token) = account_recovery
+        .find_active_by_hash(&token_hash, AccountTokenPurpose::EmailVerification, now)
+        .await?
+    else {
+        return Err(AppError::Unauthorized);
+    };
+
+    if let Some(state) = state.as_ref() {
+        sqlx::query("UPDATE users SET email_verified_at = $1, updated_at = $1 WHERE id = $2")
+            .bind(now)
+            .bind(token.user_id)
+            .execute(&state.pool)
+            .await?;
+        write_audit_event(&state.pool, Some(token.user_id), "email_verified").await?;
+    }
+
+    account_recovery
+        .consume(&token_hash, AccountTokenPurpose::EmailVerification, now)
+        .await?;
+    Ok(HttpResponse::NoContent().finish())
+}
+
+pub async fn reset_password(
+    state: Option<web::Data<AppState>>,
+    account_recovery: web::Data<AccountRecoveryRepository>,
+    request: web::Json<PasswordResetRequest>,
+) -> Result<HttpResponse, AppError> {
+    request.validate().map_err(|_| AppError::Validation)?;
+    let token_hash = hash_refresh_token(&request.token);
+    let now = Utc::now();
+    let Some(token) = account_recovery
+        .find_active_by_hash(&token_hash, AccountTokenPurpose::PasswordReset, now)
+        .await?
+    else {
+        return Err(AppError::Unauthorized);
+    };
+
+    if let Some(state) = state.as_ref() {
+        let password_hash = hash_password(&request.new_password, &state.settings.password_pepper)
+            .map_err(AppError::Internal)?;
+        sqlx::query(
+            "UPDATE user_credentials SET password_hash = $1, password_changed_at = $2, updated_at = $2 WHERE user_id = $3",
+        )
+        .bind(password_hash)
+        .bind(now)
+        .bind(token.user_id)
+        .execute(&state.pool)
+        .await?;
+        write_audit_event(&state.pool, Some(token.user_id), "password_reset_completed").await?;
+    }
+
+    account_recovery
+        .consume(&token_hash, AccountTokenPurpose::PasswordReset, now)
+        .await?;
+    Ok(HttpResponse::NoContent().finish())
+}
+
 async fn issue_token_pair(
     pool: &PgPool,
     settings: &Settings,
@@ -289,6 +369,8 @@ pub fn configure(cfg: &mut web::ServiceConfig) {
             .route("/password/register", web::post().to(register))
             .route("/password/login", web::post().to(login))
             .route("/token/refresh", web::post().to(refresh))
-            .route("/logout", web::post().to(logout)),
+            .route("/logout", web::post().to(logout))
+            .route("/email/verify", web::post().to(verify_email))
+            .route("/password/reset", web::post().to(reset_password)),
     );
 }
