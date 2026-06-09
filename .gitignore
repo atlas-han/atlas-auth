@@ -4,3 +4,6 @@
 !.env.example
 .sqlx
 .DS_Store
+
+# Claude Code harness — active git worktrees must never be committed
+.claude/worktrees/
