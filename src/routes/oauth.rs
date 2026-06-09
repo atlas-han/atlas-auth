@@ -459,9 +459,27 @@ async fn exchange_refresh_token_grant(
 }
 
 #[post("/oauth/revoke")]
-async fn revoke(form: web::Form<RevokeForm>) -> HttpResponse {
+async fn revoke(
+    form: web::Form<RevokeForm>,
+    refresh_token_repository: Option<web::Data<RefreshTokenRepository>>,
+) -> HttpResponse {
     match validate_revoke_form(&form) {
-        Ok(()) => HttpResponse::Ok().finish(),
+        Ok(()) => {
+            if let Some(refresh_token_repository) = refresh_token_repository {
+                let token_hash = hash_refresh_token(form.token.as_deref().unwrap_or_default());
+                if refresh_token_repository
+                    .revoke_by_hash(&token_hash)
+                    .await
+                    .is_err()
+                {
+                    return HttpResponse::InternalServerError().json(OAuthErrorResponse {
+                        error: "server_error",
+                        message: "Refresh token revocation failed",
+                    });
+                }
+            }
+            HttpResponse::Ok().finish()
+        }
         Err((error, message)) => {
             HttpResponse::BadRequest().json(OAuthErrorResponse { error, message })
         }
