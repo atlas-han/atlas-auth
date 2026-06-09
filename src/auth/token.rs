@@ -108,9 +108,13 @@ fn encode_rs256<T: Serialize>(settings: &Settings, claims: &T) -> anyhow::Result
 }
 
 pub fn public_jwks(settings: &Settings) -> anyhow::Result<Jwks> {
-    let public_key = RsaPublicKey::from_public_key_pem(&settings.jwt_public_key_pem)?;
+    public_jwks_from_public_key_pem(&settings.jwt_signing_key_id, &settings.jwt_public_key_pem)
+}
+
+pub fn public_jwks_from_public_key_pem(kid: &str, public_key_pem: &str) -> anyhow::Result<Jwks> {
+    let public_key = RsaPublicKey::from_public_key_pem(public_key_pem)?;
     let key = Jwk {
-        kid: settings.jwt_signing_key_id.clone(),
+        kid: kid.to_string(),
         kty: "RSA",
         alg: "RS256",
         key_use: "sig",

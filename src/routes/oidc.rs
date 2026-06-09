@@ -4,7 +4,10 @@ use serde::Serialize;
 
 use crate::{
     app::AppState,
-    auth::token::{public_jwks, Claims},
+    auth::{
+        signing_key_repository::SigningKeyRepository,
+        token::{public_jwks, public_jwks_from_public_key_pem, Claims},
+    },
 };
 
 #[derive(Debug, Serialize)]
@@ -48,7 +51,32 @@ async fn openid_configuration(state: web::Data<AppState>) -> HttpResponse {
 }
 
 #[get("/.well-known/jwks.json")]
-async fn jwks(state: web::Data<AppState>) -> HttpResponse {
+async fn jwks(
+    state: web::Data<AppState>,
+    signing_key_repository: Option<web::Data<SigningKeyRepository>>,
+) -> HttpResponse {
+    if let Some(signing_key_repository) = signing_key_repository.as_ref() {
+        match signing_key_repository.latest_active().await {
+            Ok(Some(signing_key)) => {
+                return match public_jwks_from_public_key_pem(
+                    &signing_key.kid,
+                    &signing_key.public_key,
+                ) {
+                    Ok(jwks) => HttpResponse::Ok().json(jwks),
+                    Err(error) => {
+                        tracing::error!(%error, "failed to build repository-backed JWKS");
+                        HttpResponse::InternalServerError().finish()
+                    }
+                };
+            }
+            Ok(None) => {}
+            Err(error) => {
+                tracing::error!(%error, "failed to load active signing key");
+                return HttpResponse::InternalServerError().finish();
+            }
+        }
+    }
+
     match public_jwks(&state.settings) {
         Ok(jwks) => HttpResponse::Ok().json(jwks),
         Err(error) => {
