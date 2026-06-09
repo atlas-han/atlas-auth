@@ -4,9 +4,13 @@ use serde::{Deserialize, Serialize};
 
 use crate::{
     app::AppState,
-    auth::token::{
-        hash_refresh_token, issue_access_token, issue_access_token_for_subject, issue_id_token,
-        new_refresh_token, rotate_refresh_token, StoredRefreshToken,
+    auth::{
+        signing_key_repository::SigningKeyRepository,
+        token::{
+            hash_refresh_token, issue_access_token_for_subject,
+            issue_access_token_for_subject_with_key, issue_id_token, issue_id_token_with_key,
+            new_refresh_token, rotate_refresh_token, StoredRefreshToken,
+        },
     },
     oauth::{
         authorization_code::{
@@ -169,6 +173,7 @@ async fn token(
     client_repository: Option<web::Data<OAuthClientRepository>>,
     authorization_code_repository: Option<web::Data<AuthorizationCodeRepository>>,
     refresh_token_repository: Option<web::Data<RefreshTokenRepository>>,
+    signing_key_repository: Option<web::Data<SigningKeyRepository>>,
 ) -> HttpResponse {
     if let Err((error, message)) = validate_token_form(&form) {
         return HttpResponse::BadRequest().json(OAuthErrorResponse { error, message });
@@ -192,6 +197,7 @@ async fn token(
                 client_repository,
                 authorization_code_repository,
                 refresh_token_repository,
+                signing_key_repository.as_ref(),
             )
             .await;
         }
@@ -208,6 +214,7 @@ async fn token(
                 state,
                 client_repository,
                 refresh_token_repository,
+                signing_key_repository.as_ref(),
             )
             .await;
         }
@@ -216,7 +223,13 @@ async fn token(
     if form.grant_type == "client_credentials" {
         if let (Some(state), Some(client_repository)) = (state.as_ref(), client_repository.as_ref())
         {
-            return exchange_client_credentials_grant(&form, state, client_repository).await;
+            return exchange_client_credentials_grant(
+                &form,
+                state,
+                client_repository,
+                signing_key_repository.as_ref(),
+            )
+            .await;
         }
     }
 
@@ -231,6 +244,7 @@ async fn exchange_client_credentials_grant(
     form: &TokenForm,
     state: &AppState,
     client_repository: &OAuthClientRepository,
+    signing_key_repository: Option<&web::Data<SigningKeyRepository>>,
 ) -> HttpResponse {
     let client_id = form.client_id.as_deref().unwrap_or_default();
     let client_secret = form.client_secret.as_deref().unwrap_or_default();
@@ -271,7 +285,14 @@ async fn exchange_client_credentials_grant(
     }
 
     let (access_token, expires_in) =
-        match issue_access_token_for_subject(&state.settings, &client.public_client_id, &scope) {
+        match issue_access_token_for_subject_from_repository_or_settings(
+            state,
+            signing_key_repository,
+            &client.public_client_id,
+            &scope,
+        )
+        .await
+        {
             Ok(issued_token) => issued_token,
             Err(_) => {
                 return HttpResponse::InternalServerError().json(OAuthErrorResponse {
@@ -289,12 +310,68 @@ async fn exchange_client_credentials_grant(
     })
 }
 
+async fn issue_access_token_from_repository_or_settings(
+    state: &AppState,
+    signing_key_repository: Option<&web::Data<SigningKeyRepository>>,
+    user_id: uuid::Uuid,
+    scope: &str,
+) -> anyhow::Result<(String, i64)> {
+    issue_access_token_for_subject_from_repository_or_settings(
+        state,
+        signing_key_repository,
+        &user_id.to_string(),
+        scope,
+    )
+    .await
+}
+
+async fn issue_access_token_for_subject_from_repository_or_settings(
+    state: &AppState,
+    signing_key_repository: Option<&web::Data<SigningKeyRepository>>,
+    subject: &str,
+    scope: &str,
+) -> anyhow::Result<(String, i64)> {
+    if let Some(signing_key_repository) = signing_key_repository {
+        if let Some(key) = signing_key_repository.latest_active().await? {
+            return issue_access_token_for_subject_with_key(
+                &state.settings,
+                &key.kid,
+                &key.private_key_ciphertext,
+                subject,
+                scope,
+            );
+        }
+    }
+    issue_access_token_for_subject(&state.settings, subject, scope)
+}
+
+async fn issue_id_token_from_repository_or_settings(
+    state: &AppState,
+    signing_key_repository: Option<&web::Data<SigningKeyRepository>>,
+    user_id: uuid::Uuid,
+    audience: &str,
+) -> anyhow::Result<(String, i64)> {
+    if let Some(signing_key_repository) = signing_key_repository {
+        if let Some(key) = signing_key_repository.latest_active().await? {
+            return issue_id_token_with_key(
+                &state.settings,
+                &key.kid,
+                &key.private_key_ciphertext,
+                user_id,
+                audience,
+            );
+        }
+    }
+    issue_id_token(&state.settings, user_id, audience)
+}
+
 async fn exchange_authorization_code_grant(
     form: &TokenForm,
     state: &AppState,
     client_repository: &OAuthClientRepository,
     authorization_code_repository: &AuthorizationCodeRepository,
     refresh_token_repository: &RefreshTokenRepository,
+    signing_key_repository: Option<&web::Data<SigningKeyRepository>>,
 ) -> HttpResponse {
     let client_id = form.client_id.as_deref().unwrap_or_default();
     let client_record = match client_repository
@@ -352,16 +429,22 @@ async fn exchange_authorization_code_grant(
     }
 
     let scope = stored_code.scope.join(" ");
-    let (access_token, expires_in) =
-        match issue_access_token(&state.settings, stored_code.user_id, &scope) {
-            Ok(issued_token) => issued_token,
-            Err(_) => {
-                return HttpResponse::InternalServerError().json(OAuthErrorResponse {
-                    error: "server_error",
-                    message: "Access token issuance failed",
-                })
-            }
-        };
+    let (access_token, expires_in) = match issue_access_token_from_repository_or_settings(
+        state,
+        signing_key_repository,
+        stored_code.user_id,
+        &scope,
+    )
+    .await
+    {
+        Ok(issued_token) => issued_token,
+        Err(_) => {
+            return HttpResponse::InternalServerError().json(OAuthErrorResponse {
+                error: "server_error",
+                message: "Access token issuance failed",
+            })
+        }
+    };
 
     let refresh_token = new_refresh_token();
     let refresh_token_hash = hash_refresh_token(&refresh_token);
@@ -397,11 +480,14 @@ async fn exchange_authorization_code_grant(
     }
 
     let id_token = if stored_code.scope.iter().any(|scope| scope == "openid") {
-        match issue_id_token(
-            &state.settings,
+        match issue_id_token_from_repository_or_settings(
+            state,
+            signing_key_repository,
             stored_code.user_id,
             &client_record.public_client_id,
-        ) {
+        )
+        .await
+        {
             Ok((id_token, _)) => Some(id_token),
             Err(_) => {
                 return HttpResponse::InternalServerError().json(OAuthErrorResponse {
@@ -429,6 +515,7 @@ async fn exchange_refresh_token_grant(
     state: &AppState,
     client_repository: &OAuthClientRepository,
     refresh_token_repository: &RefreshTokenRepository,
+    signing_key_repository: Option<&web::Data<SigningKeyRepository>>,
 ) -> HttpResponse {
     let client_id = match form.client_id.as_deref() {
         Some(client_id) if !client_id.trim().is_empty() => client_id,
@@ -512,16 +599,22 @@ async fn exchange_refresh_token_grant(
     };
 
     let scope = stored_record.scope.join(" ");
-    let (access_token, expires_in) =
-        match issue_access_token(&state.settings, stored_record.user_id, &scope) {
-            Ok(issued_token) => issued_token,
-            Err(_) => {
-                return HttpResponse::InternalServerError().json(OAuthErrorResponse {
-                    error: "server_error",
-                    message: "Access token issuance failed",
-                })
-            }
-        };
+    let (access_token, expires_in) = match issue_access_token_from_repository_or_settings(
+        state,
+        signing_key_repository,
+        stored_record.user_id,
+        &scope,
+    )
+    .await
+    {
+        Ok(issued_token) => issued_token,
+        Err(_) => {
+            return HttpResponse::InternalServerError().json(OAuthErrorResponse {
+                error: "server_error",
+                message: "Access token issuance failed",
+            })
+        }
+    };
 
     if refresh_token_repository
         .save(NewRefreshToken {

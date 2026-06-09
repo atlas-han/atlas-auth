@@ -59,6 +59,22 @@ pub fn issue_access_token_for_subject(
     subject: &str,
     scope: &str,
 ) -> anyhow::Result<(String, i64)> {
+    issue_access_token_for_subject_with_key(
+        settings,
+        &settings.jwt_signing_key_id,
+        &settings.jwt_private_key_pem,
+        subject,
+        scope,
+    )
+}
+
+pub fn issue_access_token_for_subject_with_key(
+    settings: &Settings,
+    kid: &str,
+    private_key_pem: &str,
+    subject: &str,
+    scope: &str,
+) -> anyhow::Result<(String, i64)> {
     let now = Utc::now();
     let exp = now + Duration::seconds(settings.jwt_access_token_ttl_seconds);
     let claims = Claims {
@@ -71,13 +87,29 @@ pub fn issue_access_token_for_subject(
         jti: Uuid::new_v4().to_string(),
     };
 
-    let token = encode_rs256(settings, &claims)?;
+    let token = encode_rs256_with_key(kid, private_key_pem, &claims)?;
 
     Ok((token, settings.jwt_access_token_ttl_seconds))
 }
 
 pub fn issue_id_token(
     settings: &Settings,
+    user_id: Uuid,
+    audience: &str,
+) -> anyhow::Result<(String, i64)> {
+    issue_id_token_with_key(
+        settings,
+        &settings.jwt_signing_key_id,
+        &settings.jwt_private_key_pem,
+        user_id,
+        audience,
+    )
+}
+
+pub fn issue_id_token_with_key(
+    settings: &Settings,
+    kid: &str,
+    private_key_pem: &str,
     user_id: Uuid,
     audience: &str,
 ) -> anyhow::Result<(String, i64)> {
@@ -92,18 +124,22 @@ pub fn issue_id_token(
         jti: Uuid::new_v4().to_string(),
     };
 
-    let token = encode_rs256(settings, &claims)?;
+    let token = encode_rs256_with_key(kid, private_key_pem, &claims)?;
 
     Ok((token, settings.jwt_access_token_ttl_seconds))
 }
 
-fn encode_rs256<T: Serialize>(settings: &Settings, claims: &T) -> anyhow::Result<String> {
+fn encode_rs256_with_key<T: Serialize>(
+    kid: &str,
+    private_key_pem: &str,
+    claims: &T,
+) -> anyhow::Result<String> {
     let mut header = Header::new(Algorithm::RS256);
-    header.kid = Some(settings.jwt_signing_key_id.clone());
+    header.kid = Some(kid.to_string());
     Ok(encode(
         &header,
         claims,
-        &EncodingKey::from_rsa_pem(settings.jwt_private_key_pem.as_bytes())?,
+        &EncodingKey::from_rsa_pem(private_key_pem.as_bytes())?,
     )?)
 }
 
