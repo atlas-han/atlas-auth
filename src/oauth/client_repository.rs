@@ -1,3 +1,5 @@
+use std::sync::{Arc, Mutex};
+
 use sqlx::{FromRow, PgPool};
 use uuid::Uuid;
 
@@ -65,8 +67,11 @@ pub async fn find_active_client_by_public_client_id(
 #[derive(Clone)]
 pub enum OAuthClientRepository {
     Postgres(PgPool),
-    InMemory(Vec<ClientRecord>),
+    InMemory(Arc<Mutex<Vec<ClientRecord>>>),
 }
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct InMemoryClientStoreRequired;
 
 impl OAuthClientRepository {
     pub fn postgres(pool: PgPool) -> Self {
@@ -74,7 +79,7 @@ impl OAuthClientRepository {
     }
 
     pub fn in_memory(clients: Vec<ClientRecord>) -> Self {
-        Self::InMemory(clients)
+        Self::InMemory(Arc::new(Mutex::new(clients)))
     }
 
     pub async fn find_active_by_public_client_id(
@@ -86,11 +91,59 @@ impl OAuthClientRepository {
                 find_active_client_by_public_client_id(pool, public_client_id).await
             }
             Self::InMemory(clients) => Ok(clients
+                .lock()
+                .expect("oauth clients lock poisoned")
                 .iter()
                 .find(|client| {
                     client.public_client_id == public_client_id && client.status == "active"
                 })
                 .cloned()),
         }
+    }
+
+    pub fn upsert_in_memory(
+        &self,
+        record: ClientRecord,
+    ) -> Result<(), InMemoryClientStoreRequired> {
+        let Self::InMemory(clients) = self else {
+            return Err(InMemoryClientStoreRequired);
+        };
+        let mut clients = clients.lock().expect("oauth clients lock poisoned");
+        if let Some(existing) = clients
+            .iter_mut()
+            .find(|client| client.public_client_id == record.public_client_id)
+        {
+            *existing = record;
+        } else {
+            clients.push(record);
+        }
+        Ok(())
+    }
+
+    pub fn update_in_memory(
+        &self,
+        public_client_id: &str,
+        update: impl FnOnce(&mut ClientRecord),
+    ) -> Result<bool, InMemoryClientStoreRequired> {
+        let Self::InMemory(clients) = self else {
+            return Err(InMemoryClientStoreRequired);
+        };
+        let mut clients = clients.lock().expect("oauth clients lock poisoned");
+        let Some(client) = clients.iter_mut().find(|client| {
+            client.public_client_id == public_client_id && client.status == "active"
+        }) else {
+            return Ok(false);
+        };
+        update(client);
+        Ok(true)
+    }
+
+    pub fn deactivate_in_memory(
+        &self,
+        public_client_id: &str,
+    ) -> Result<bool, InMemoryClientStoreRequired> {
+        self.update_in_memory(public_client_id, |client| {
+            client.status = "deleted".to_string();
+        })
     }
 }
