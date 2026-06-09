@@ -61,6 +61,12 @@ struct IntrospectForm {
 #[derive(Debug, Serialize)]
 struct IntrospectionResponse {
     active: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    sub: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    client_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    scope: Option<String>,
 }
 
 #[derive(Debug, Serialize)]
@@ -487,9 +493,32 @@ async fn revoke(
 }
 
 #[post("/oauth/introspect")]
-async fn introspect(form: web::Form<IntrospectForm>) -> HttpResponse {
+async fn introspect(
+    form: web::Form<IntrospectForm>,
+    refresh_token_repository: Option<web::Data<RefreshTokenRepository>>,
+) -> HttpResponse {
     match validate_introspect_form(&form) {
-        Ok(()) => HttpResponse::Ok().json(IntrospectionResponse { active: false }),
+        Ok(()) => {
+            if let Some(refresh_token_repository) = refresh_token_repository {
+                let token_hash = hash_refresh_token(form.token.as_deref().unwrap_or_default());
+                if let Ok(Some(record)) = refresh_token_repository.find_by_hash(&token_hash).await {
+                    if !record.revoked && record.expires_at > Utc::now() {
+                        return HttpResponse::Ok().json(IntrospectionResponse {
+                            active: true,
+                            sub: Some(record.user_id.to_string()),
+                            client_id: Some(record.client_id.to_string()),
+                            scope: Some(record.scope.join(" ")),
+                        });
+                    }
+                }
+            }
+            HttpResponse::Ok().json(IntrospectionResponse {
+                active: false,
+                sub: None,
+                client_id: None,
+                scope: None,
+            })
+        }
         Err((error, message)) => {
             HttpResponse::BadRequest().json(OAuthErrorResponse { error, message })
         }
