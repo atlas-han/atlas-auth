@@ -134,11 +134,12 @@ impl RefreshTokenRepository {
                 Ok(())
             }
             Self::InMemory(tokens) => {
+                // Mirror Postgres `WHERE token_hash = $1 AND revoked_at IS NULL`.
                 if let Some(token) = tokens
                     .lock()
                     .expect("refresh token store poisoned")
                     .iter_mut()
-                    .find(|token| token.token_hash == token_hash)
+                    .find(|token| token.token_hash == token_hash && !token.revoked)
                 {
                     token.revoked = true;
                 }

@@ -113,11 +113,13 @@ impl SigningKeyRepository {
                 Ok(())
             }
             Self::InMemory(keys) => {
+                // Postgres retires only an *active* key (`AND status = 'active'`);
+                // match that guard so an already-retired key is a no-op here too.
                 if let Some(key) = keys
                     .lock()
                     .expect("signing key store poisoned")
                     .iter_mut()
-                    .find(|key| key.kid == kid)
+                    .find(|key| key.kid == kid && key.status == "active")
                 {
                     key.status = "retired".to_string();
                 }
