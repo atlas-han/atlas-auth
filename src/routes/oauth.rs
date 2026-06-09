@@ -1,6 +1,7 @@
 use actix_web::{get, post, web, HttpResponse};
 use chrono::{Duration, Utc};
 use serde::{Deserialize, Serialize};
+use uuid::Uuid;
 
 use crate::{
     app::AppState,
@@ -18,6 +19,7 @@ use crate::{
         },
         client::{parse_scope, validate_authorize_client, validate_client_credentials_client},
         client_repository::OAuthClientRepository,
+        consent_repository::ConsentRepository,
         refresh_token_repository::{NewRefreshToken, RefreshTokenRepository},
     },
 };
@@ -31,6 +33,7 @@ struct AuthorizeQuery {
     state: String,
     code_challenge: Option<String>,
     code_challenge_method: Option<String>,
+    user_id: Option<Uuid>,
 }
 
 #[derive(Debug, Serialize)]
@@ -115,6 +118,7 @@ struct ClientCredentialsTokenResponse {
 async fn authorize(
     query: web::Query<AuthorizeQuery>,
     client_repository: Option<web::Data<OAuthClientRepository>>,
+    consent_repository: Option<web::Data<ConsentRepository>>,
 ) -> HttpResponse {
     if let Err(message) = validate_authorize_query(&query) {
         return HttpResponse::BadRequest().json(OAuthErrorResponse {
@@ -143,7 +147,7 @@ async fn authorize(
             }
         };
 
-        let client = client_record.into();
+        let client = client_record.clone().into();
         let requested_scopes = parse_scope(query.scope.as_deref());
         if let Err(message) =
             validate_authorize_client(&client, &query.redirect_uri, &requested_scopes)
@@ -152,6 +156,35 @@ async fn authorize(
                 error: "invalid_request",
                 message,
             });
+        }
+
+        if let Some(consent_repository) = consent_repository.as_ref() {
+            if !client_record.trusted_first_party {
+                let Some(user_id) = query.user_id else {
+                    return HttpResponse::Forbidden().json(OAuthErrorResponse {
+                        error: "consent_required",
+                        message: "User consent is required for requested scopes",
+                    });
+                };
+                match consent_repository
+                    .has_granted_scopes(user_id, client_record.id, &requested_scopes)
+                    .await
+                {
+                    Ok(true) => {}
+                    Ok(false) => {
+                        return HttpResponse::Forbidden().json(OAuthErrorResponse {
+                            error: "consent_required",
+                            message: "User consent is required for requested scopes",
+                        })
+                    }
+                    Err(_) => {
+                        return HttpResponse::InternalServerError().json(OAuthErrorResponse {
+                            error: "server_error",
+                            message: "Consent lookup failed",
+                        })
+                    }
+                }
+            }
         }
     }
 
