@@ -146,4 +146,34 @@ impl RefreshTokenRepository {
             }
         }
     }
+
+    pub async fn revoke_family(&self, family_id: Uuid) -> Result<(), sqlx::Error> {
+        match self {
+            Self::Postgres(pool) => {
+                sqlx::query(
+                    r#"
+                        UPDATE refresh_tokens
+                        SET revoked_at = now()
+                        WHERE family_id = $1
+                          AND revoked_at IS NULL
+                    "#,
+                )
+                .bind(family_id)
+                .execute(pool)
+                .await?;
+                Ok(())
+            }
+            Self::InMemory(tokens) => {
+                for token in tokens
+                    .lock()
+                    .expect("refresh token store poisoned")
+                    .iter_mut()
+                    .filter(|token| token.family_id == family_id)
+                {
+                    token.revoked = true;
+                }
+                Ok(())
+            }
+        }
+    }
 }

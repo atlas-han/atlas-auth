@@ -137,3 +137,79 @@ async fn refresh_token_grant_rotates_refresh_token_and_issues_access_token() {
     );
     assert!(!new_token.revoked);
 }
+
+#[actix_rt::test]
+async fn refresh_token_reuse_revokes_entire_token_family() {
+    let client_uuid = Uuid::parse_str("22222222-2222-2222-2222-222222222222").unwrap();
+    let user_uuid = Uuid::parse_str("44444444-4444-4444-4444-444444444444").unwrap();
+    let family_uuid = Uuid::parse_str("66666666-6666-6666-6666-666666666666").unwrap();
+    let reused_refresh_token = new_refresh_token();
+    let reused_refresh_token_hash = hash_refresh_token(&reused_refresh_token);
+    let active_refresh_token = new_refresh_token();
+    let active_refresh_token_hash = hash_refresh_token(&active_refresh_token);
+    let refresh_tokens = RefreshTokenRepository::in_memory();
+    refresh_tokens
+        .save(NewRefreshToken {
+            id: Uuid::new_v4(),
+            user_id: user_uuid,
+            client_id: client_uuid,
+            token_hash: reused_refresh_token_hash.clone(),
+            family_id: family_uuid,
+            scope: vec!["openid".to_string(), "email".to_string()],
+            expires_at: Utc::now() + Duration::days(14),
+        })
+        .await
+        .unwrap();
+    refresh_tokens
+        .save(NewRefreshToken {
+            id: Uuid::new_v4(),
+            user_id: user_uuid,
+            client_id: client_uuid,
+            token_hash: active_refresh_token_hash.clone(),
+            family_id: family_uuid,
+            scope: vec!["openid".to_string(), "email".to_string()],
+            expires_at: Utc::now() + Duration::days(14),
+        })
+        .await
+        .unwrap();
+    refresh_tokens
+        .revoke_by_hash(&reused_refresh_token_hash)
+        .await
+        .unwrap();
+    let clients = OAuthClientRepository::in_memory(vec![client_record(client_uuid)]);
+    let app = test::init_service(
+        App::new()
+            .app_data(web::Data::new(test_state()))
+            .app_data(web::Data::new(clients))
+            .app_data(web::Data::new(refresh_tokens.clone()))
+            .configure(routes::oauth::configure),
+    )
+    .await;
+
+    let req = test::TestRequest::post()
+        .uri("/oauth/token")
+        .set_form([
+            ("grant_type", "refresh_token"),
+            ("client_id", "client-1"),
+            ("refresh_token", reused_refresh_token.as_str()),
+        ])
+        .to_request();
+    let resp = test::call_service(&app, req).await;
+    let status = resp.status();
+    let body: Value = test::read_body_json(resp).await;
+
+    assert_eq!(status, actix_web::http::StatusCode::BAD_REQUEST);
+    assert_eq!(body["error"], "invalid_grant");
+    let reused_record = refresh_tokens
+        .find_by_hash(&reused_refresh_token_hash)
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(reused_record.revoked);
+    let active_record = refresh_tokens
+        .find_by_hash(&active_refresh_token_hash)
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(active_record.revoked);
+}

@@ -378,6 +378,18 @@ async fn exchange_refresh_token_grant(
         });
     }
 
+    if stored_record.revoked
+        && refresh_token_repository
+            .revoke_family(stored_record.family_id)
+            .await
+            .is_err()
+    {
+        return HttpResponse::InternalServerError().json(OAuthErrorResponse {
+            error: "server_error",
+            message: "Refresh token family revocation failed",
+        });
+    }
+
     let stored_token = StoredRefreshToken {
         token_hash: stored_record.token_hash.clone(),
         family_id: stored_record.family_id,
