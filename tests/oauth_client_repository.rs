@@ -6,6 +6,7 @@ fn client_record() -> ClientRecord {
     ClientRecord {
         id: Uuid::parse_str("11111111-1111-1111-1111-111111111111").unwrap(),
         public_client_id: "client-1".to_string(),
+        client_secret_hash: None,
         client_type: "public".to_string(),
         allowed_redirect_uris: vec!["https://app.example.test/callback".to_string()],
         grant_types: vec![

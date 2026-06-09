@@ -7,6 +7,7 @@ use crate::oauth::client::OAuthClient;
 pub struct ClientRecord {
     pub id: Uuid,
     pub public_client_id: String,
+    pub client_secret_hash: Option<String>,
     pub client_type: String,
     pub allowed_redirect_uris: Vec<String>,
     pub grant_types: Vec<String>,
@@ -21,6 +22,7 @@ impl From<ClientRecord> for OAuthClient {
     fn from(record: ClientRecord) -> Self {
         Self {
             public_client_id: record.public_client_id,
+            client_secret_hash: record.client_secret_hash,
             client_type: record.client_type,
             allowed_redirect_uris: record.allowed_redirect_uris,
             grant_types: record.grant_types,
@@ -35,6 +37,7 @@ pub fn client_by_public_id_sql() -> &'static str {
         SELECT
             id,
             public_client_id,
+            client_secret_hash,
             client_type,
             allowed_redirect_uris,
             grant_types,

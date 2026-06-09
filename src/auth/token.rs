@@ -41,10 +41,18 @@ pub fn issue_access_token(
     user_id: Uuid,
     scope: &str,
 ) -> anyhow::Result<(String, i64)> {
+    issue_access_token_for_subject(settings, &user_id.to_string(), scope)
+}
+
+pub fn issue_access_token_for_subject(
+    settings: &Settings,
+    subject: &str,
+    scope: &str,
+) -> anyhow::Result<(String, i64)> {
     let now = Utc::now();
     let exp = now + Duration::seconds(settings.jwt_access_token_ttl_seconds);
     let claims = Claims {
-        sub: user_id.to_string(),
+        sub: subject.to_string(),
         iss: settings.jwt_issuer.clone(),
         aud: settings.jwt_audience.clone(),
         scope: scope.to_string(),

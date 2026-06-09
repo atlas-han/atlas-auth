@@ -5,14 +5,14 @@ use serde::{Deserialize, Serialize};
 use crate::{
     app::AppState,
     auth::token::{
-        hash_refresh_token, issue_access_token, new_refresh_token, rotate_refresh_token,
-        StoredRefreshToken,
+        hash_refresh_token, issue_access_token, issue_access_token_for_subject, new_refresh_token,
+        rotate_refresh_token, StoredRefreshToken,
     },
     oauth::{
         authorization_code::{
             exchange_authorization_code, hash_authorization_code, AuthorizationCodeRepository,
         },
-        client::{parse_scope, validate_authorize_client},
+        client::{parse_scope, validate_authorize_client, validate_client_credentials_client},
         client_repository::OAuthClientRepository,
         refresh_token_repository::{NewRefreshToken, RefreshTokenRepository},
     },
@@ -44,6 +44,7 @@ struct TokenForm {
     redirect_uri: Option<String>,
     refresh_token: Option<String>,
     scope: Option<String>,
+    client_secret: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -91,6 +92,14 @@ struct TokenValidationResponse {
 struct TokenResponse {
     access_token: String,
     refresh_token: String,
+    token_type: &'static str,
+    expires_in: i64,
+    scope: String,
+}
+
+#[derive(Debug, Serialize)]
+struct ClientCredentialsTokenResponse {
+    access_token: String,
     token_type: &'static str,
     expires_in: i64,
     scope: String,
@@ -202,10 +211,79 @@ async fn token(
         }
     }
 
+    if form.grant_type == "client_credentials" {
+        if let (Some(state), Some(client_repository)) = (state.as_ref(), client_repository.as_ref())
+        {
+            return exchange_client_credentials_grant(&form, state, client_repository).await;
+        }
+    }
+
     HttpResponse::Ok().json(TokenValidationResponse {
         status: "validated",
         grant_type: form.grant_type.clone(),
         client_id: form.client_id.clone().unwrap_or_default(),
+    })
+}
+
+async fn exchange_client_credentials_grant(
+    form: &TokenForm,
+    state: &AppState,
+    client_repository: &OAuthClientRepository,
+) -> HttpResponse {
+    let client_id = form.client_id.as_deref().unwrap_or_default();
+    let client_secret = form.client_secret.as_deref().unwrap_or_default();
+    let client_record = match client_repository
+        .find_active_by_public_client_id(client_id)
+        .await
+    {
+        Ok(Some(client_record)) => client_record,
+        Ok(None) => {
+            return HttpResponse::BadRequest().json(OAuthErrorResponse {
+                error: "invalid_client",
+                message: "Client is not registered or active",
+            })
+        }
+        Err(_) => {
+            return HttpResponse::InternalServerError().json(OAuthErrorResponse {
+                error: "server_error",
+                message: "Client lookup failed",
+            })
+        }
+    };
+
+    let requested_scopes = parse_scope(form.scope.as_deref());
+    let scope = if requested_scopes.is_empty() {
+        client_record.scopes.join(" ")
+    } else {
+        requested_scopes.join(" ")
+    };
+    let client = client_record.into();
+    let effective_scopes = parse_scope(Some(&scope));
+    if let Err(message) =
+        validate_client_credentials_client(&client, client_secret, &effective_scopes)
+    {
+        return HttpResponse::BadRequest().json(OAuthErrorResponse {
+            error: "invalid_client",
+            message,
+        });
+    }
+
+    let (access_token, expires_in) =
+        match issue_access_token_for_subject(&state.settings, &client.public_client_id, &scope) {
+            Ok(issued_token) => issued_token,
+            Err(_) => {
+                return HttpResponse::InternalServerError().json(OAuthErrorResponse {
+                    error: "server_error",
+                    message: "Access token issuance failed",
+                })
+            }
+        };
+
+    HttpResponse::Ok().json(ClientCredentialsTokenResponse {
+        access_token,
+        token_type: "Bearer",
+        expires_in,
+        scope,
     })
 }
 

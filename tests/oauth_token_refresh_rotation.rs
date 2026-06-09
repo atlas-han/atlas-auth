@@ -52,6 +52,7 @@ fn client_record(client_uuid: Uuid) -> ClientRecord {
     ClientRecord {
         id: client_uuid,
         public_client_id: "client-1".to_string(),
+        client_secret_hash: None,
         client_type: "public".to_string(),
         allowed_redirect_uris: vec!["https://app.example.test/callback".to_string()],
         grant_types: vec![
