@@ -64,6 +64,29 @@ async fn account_recovery_repository_consumes_password_reset_tokens_once() {
 }
 
 #[actix_rt::test]
+async fn account_recovery_repository_rejects_duplicate_token_hash() {
+    // The Postgres backend enforces `token_hash TEXT NOT NULL UNIQUE`, so the
+    // in-memory backend must reject a duplicate the same way (Liskov parity):
+    // a unique violation that `AppError` maps to `Conflict`, not a silent insert.
+    let repository = AccountRecoveryRepository::in_memory();
+    let token = new_token(AccountTokenPurpose::EmailVerification);
+
+    repository.save(token.clone()).await.unwrap();
+    let error = repository
+        .save(token)
+        .await
+        .expect_err("a duplicate token_hash must be rejected like the Postgres UNIQUE constraint");
+
+    match error {
+        sqlx::Error::Database(db_error) => assert!(
+            db_error.is_unique_violation(),
+            "a duplicate insert should surface as a unique violation so it maps to AppError::Conflict",
+        ),
+        other => panic!("expected a database unique violation, got {other:?}"),
+    }
+}
+
+#[actix_rt::test]
 async fn account_recovery_repository_ignores_expired_tokens() {
     let repository = AccountRecoveryRepository::in_memory();
     let mut token = new_token(AccountTokenPurpose::PasswordReset);

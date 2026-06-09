@@ -70,6 +70,61 @@ impl From<AccountRecoveryTokenRow> for StoredAccountRecoveryToken {
     }
 }
 
+/// A minimal [`sqlx::error::DatabaseError`] reporting a unique-constraint
+/// violation. The in-memory repository variant returns this so it rejects a
+/// duplicate key exactly like the Postgres `UNIQUE` constraint does:
+/// `AppError`'s `From<sqlx::Error>` maps any `is_unique_violation()` error to
+/// `AppError::Conflict`, keeping the two backends behaviorally interchangeable
+/// (Liskov) on duplicate inserts instead of silently accepting them.
+#[derive(Debug)]
+struct InMemoryUniqueViolation {
+    constraint: &'static str,
+}
+
+impl InMemoryUniqueViolation {
+    fn new(constraint: &'static str) -> Self {
+        Self { constraint }
+    }
+}
+
+impl std::fmt::Display for InMemoryUniqueViolation {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "duplicate key value violates unique constraint \"{}\"",
+            self.constraint
+        )
+    }
+}
+
+impl std::error::Error for InMemoryUniqueViolation {}
+
+impl sqlx::error::DatabaseError for InMemoryUniqueViolation {
+    fn message(&self) -> &str {
+        "duplicate key value violates unique constraint"
+    }
+
+    fn kind(&self) -> sqlx::error::ErrorKind {
+        sqlx::error::ErrorKind::UniqueViolation
+    }
+
+    fn constraint(&self) -> Option<&str> {
+        Some(self.constraint)
+    }
+
+    fn as_error(&self) -> &(dyn std::error::Error + Send + Sync + 'static) {
+        self
+    }
+
+    fn as_error_mut(&mut self) -> &mut (dyn std::error::Error + Send + Sync + 'static) {
+        self
+    }
+
+    fn into_error(self: Box<Self>) -> Box<dyn std::error::Error + Send + Sync + 'static> {
+        self
+    }
+}
+
 #[derive(Clone)]
 pub enum AccountRecoveryRepository {
     Postgres(PgPool),
@@ -109,17 +164,27 @@ impl AccountRecoveryRepository {
                 Ok(())
             }
             Self::InMemory(tokens) => {
-                tokens
+                let mut guard = tokens
                     .lock()
-                    .expect("account recovery token store poisoned")
-                    .push(StoredAccountRecoveryToken {
-                        id: token.id,
-                        user_id: token.user_id,
-                        token_hash: token.token_hash,
-                        purpose: token.purpose,
-                        expires_at: token.expires_at,
-                        consumed_at: None,
-                    });
+                    .expect("account recovery token store poisoned");
+                if guard
+                    .iter()
+                    .any(|existing| existing.token_hash == token.token_hash)
+                {
+                    // Postgres enforces `token_hash TEXT NOT NULL UNIQUE`; mirror
+                    // that here so the in-memory backend rejects duplicates too.
+                    return Err(sqlx::Error::Database(Box::new(
+                        InMemoryUniqueViolation::new("account_recovery_tokens_token_hash_key"),
+                    )));
+                }
+                guard.push(StoredAccountRecoveryToken {
+                    id: token.id,
+                    user_id: token.user_id,
+                    token_hash: token.token_hash,
+                    purpose: token.purpose,
+                    expires_at: token.expires_at,
+                    consumed_at: None,
+                });
                 Ok(())
             }
         }

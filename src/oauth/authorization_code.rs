@@ -211,11 +211,12 @@ impl AuthorizationCodeRepository {
                 Ok(())
             }
             Self::InMemory(codes) => {
+                // Mirror Postgres `WHERE code_hash = $1 AND consumed_at IS NULL`.
                 if let Some(code) = codes
                     .lock()
                     .expect("authorization code store poisoned")
                     .iter_mut()
-                    .find(|code| code.code_hash == code_hash)
+                    .find(|code| code.code_hash == code_hash && !code.consumed)
                 {
                     code.consumed = true;
                 }
