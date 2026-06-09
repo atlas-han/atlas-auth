@@ -1,6 +1,11 @@
 use actix_web::{get, post, web, HttpResponse};
 use serde::{Deserialize, Serialize};
 
+use crate::oauth::{
+    client::{parse_scope, validate_authorize_client},
+    client_repository::OAuthClientRepository,
+};
+
 #[derive(Debug, Deserialize)]
 struct AuthorizeQuery {
     response_type: String,
@@ -65,22 +70,58 @@ struct TokenValidationResponse {
 }
 
 #[get("/oauth/authorize")]
-async fn authorize(query: web::Query<AuthorizeQuery>) -> HttpResponse {
-    match validate_authorize_query(&query) {
-        Ok(()) => HttpResponse::Ok().json(AuthorizeValidationResponse {
-            status: "validated",
-            response_type: query.response_type.clone(),
-            client_id: query.client_id.clone(),
-            redirect_uri: query.redirect_uri.clone(),
-            scope: query.scope.clone().unwrap_or_default(),
-            state: query.state.clone(),
-            code_challenge_method: "S256".to_string(),
-        }),
-        Err(message) => HttpResponse::BadRequest().json(OAuthErrorResponse {
+async fn authorize(
+    query: web::Query<AuthorizeQuery>,
+    client_repository: Option<web::Data<OAuthClientRepository>>,
+) -> HttpResponse {
+    if let Err(message) = validate_authorize_query(&query) {
+        return HttpResponse::BadRequest().json(OAuthErrorResponse {
             error: "invalid_request",
             message,
-        }),
+        });
     }
+
+    if let Some(client_repository) = client_repository {
+        let client_record = match client_repository
+            .find_active_by_public_client_id(&query.client_id)
+            .await
+        {
+            Ok(Some(client_record)) => client_record,
+            Ok(None) => {
+                return HttpResponse::BadRequest().json(OAuthErrorResponse {
+                    error: "invalid_client",
+                    message: "Client is not registered or active",
+                })
+            }
+            Err(_) => {
+                return HttpResponse::InternalServerError().json(OAuthErrorResponse {
+                    error: "server_error",
+                    message: "Client lookup failed",
+                })
+            }
+        };
+
+        let client = client_record.into();
+        let requested_scopes = parse_scope(query.scope.as_deref());
+        if let Err(message) =
+            validate_authorize_client(&client, &query.redirect_uri, &requested_scopes)
+        {
+            return HttpResponse::BadRequest().json(OAuthErrorResponse {
+                error: "invalid_request",
+                message,
+            });
+        }
+    }
+
+    HttpResponse::Ok().json(AuthorizeValidationResponse {
+        status: "validated",
+        response_type: query.response_type.clone(),
+        client_id: query.client_id.clone(),
+        redirect_uri: query.redirect_uri.clone(),
+        scope: query.scope.clone().unwrap_or_default(),
+        state: query.state.clone(),
+        code_challenge_method: "S256".to_string(),
+    })
 }
 
 #[post("/oauth/token")]

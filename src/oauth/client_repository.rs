@@ -58,3 +58,36 @@ pub async fn find_active_client_by_public_client_id(
         .fetch_optional(pool)
         .await
 }
+
+#[derive(Clone)]
+pub enum OAuthClientRepository {
+    Postgres(PgPool),
+    InMemory(Vec<ClientRecord>),
+}
+
+impl OAuthClientRepository {
+    pub fn postgres(pool: PgPool) -> Self {
+        Self::Postgres(pool)
+    }
+
+    pub fn in_memory(clients: Vec<ClientRecord>) -> Self {
+        Self::InMemory(clients)
+    }
+
+    pub async fn find_active_by_public_client_id(
+        &self,
+        public_client_id: &str,
+    ) -> Result<Option<ClientRecord>, sqlx::Error> {
+        match self {
+            Self::Postgres(pool) => {
+                find_active_client_by_public_client_id(pool, public_client_id).await
+            }
+            Self::InMemory(clients) => Ok(clients
+                .iter()
+                .find(|client| {
+                    client.public_client_id == public_client_id && client.status == "active"
+                })
+                .cloned()),
+        }
+    }
+}
