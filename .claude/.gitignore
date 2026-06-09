@@ -1,0 +1,6 @@
+# Active git worktrees managed by Claude Code — never commit these.
+worktrees/
+
+# Harness output (e.g. session handoff artifacts). Keep the dir, ignore contents.
+harness/*
+!harness/.gitkeep
