@@ -9,6 +9,7 @@ use crate::{
     app::AppState,
     auth::{
         account_recovery_repository::{AccountRecoveryRepository, AccountTokenPurpose},
+        federated_identity_repository::{FederatedIdentityRepository, NewFederatedIdentity},
         login_attempt_repository::LoginAttemptRepository,
         password::{hash_password, verify_password},
         token::{hash_refresh_token, issue_access_token, new_refresh_token},
@@ -42,6 +43,21 @@ pub struct PasswordResetRequest {
     pub token: String,
     #[validate(length(min = 12, max = 256))]
     pub new_password: String,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct SocialCallbackQuery {
+    pub provider_user_id: String,
+    pub email: Option<String>,
+    pub user_id: Option<Uuid>,
+}
+
+#[derive(Debug, Serialize)]
+pub struct SocialCallbackResponse {
+    pub provider: String,
+    pub provider_user_id: String,
+    pub user_id: Uuid,
+    pub linked_existing: bool,
 }
 
 #[derive(Debug, Serialize)]
@@ -302,6 +318,55 @@ pub async fn reset_password(
     Ok(HttpResponse::NoContent().finish())
 }
 
+pub async fn social_callback(
+    provider: web::Path<String>,
+    identities: web::Data<FederatedIdentityRepository>,
+    query: web::Query<SocialCallbackQuery>,
+) -> Result<HttpResponse, AppError> {
+    let provider = provider.into_inner().to_lowercase();
+    if provider != "google" && provider != "facebook" {
+        return Err(AppError::Validation);
+    }
+    if query.provider_user_id.trim().is_empty() {
+        return Err(AppError::Validation);
+    }
+
+    if let Some(existing) = identities
+        .find_by_provider_user_id(&provider, &query.provider_user_id)
+        .await?
+    {
+        return Ok(HttpResponse::Ok().json(SocialCallbackResponse {
+            provider,
+            provider_user_id: query.provider_user_id.clone(),
+            user_id: existing.user_id,
+            linked_existing: true,
+        }));
+    }
+
+    let user_id = query.user_id.unwrap_or_else(Uuid::new_v4);
+    identities
+        .link(NewFederatedIdentity {
+            id: Uuid::new_v4(),
+            user_id,
+            provider: provider.clone(),
+            provider_user_id: query.provider_user_id.clone(),
+            email: query.email.clone(),
+            profile: serde_json::json!({
+                "provider": provider,
+                "provider_user_id": query.provider_user_id,
+                "email": query.email,
+            }),
+        })
+        .await?;
+
+    Ok(HttpResponse::Ok().json(SocialCallbackResponse {
+        provider,
+        provider_user_id: query.provider_user_id.clone(),
+        user_id,
+        linked_existing: false,
+    }))
+}
+
 async fn issue_token_pair(
     pool: &PgPool,
     settings: &Settings,
@@ -371,6 +436,10 @@ pub fn configure(cfg: &mut web::ServiceConfig) {
             .route("/token/refresh", web::post().to(refresh))
             .route("/logout", web::post().to(logout))
             .route("/email/verify", web::post().to(verify_email))
-            .route("/password/reset", web::post().to(reset_password)),
+            .route("/password/reset", web::post().to(reset_password))
+            .route(
+                "/social/{provider}/callback",
+                web::get().to(social_callback),
+            ),
     );
 }
