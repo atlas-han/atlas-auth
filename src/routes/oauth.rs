@@ -1,16 +1,17 @@
 use actix_web::{get, post, web, HttpResponse};
-use chrono::Utc;
+use chrono::{Duration, Utc};
 use serde::{Deserialize, Serialize};
 
 use crate::{
     app::AppState,
-    auth::token::issue_access_token,
+    auth::token::{hash_refresh_token, issue_access_token, new_refresh_token},
     oauth::{
         authorization_code::{
             exchange_authorization_code, hash_authorization_code, AuthorizationCodeRepository,
         },
         client::{parse_scope, validate_authorize_client},
         client_repository::OAuthClientRepository,
+        refresh_token_repository::{NewRefreshToken, RefreshTokenRepository},
     },
 };
 
@@ -80,6 +81,7 @@ struct TokenValidationResponse {
 #[derive(Debug, Serialize)]
 struct TokenResponse {
     access_token: String,
+    refresh_token: String,
     token_type: &'static str,
     expires_in: i64,
     scope: String,
@@ -146,20 +148,30 @@ async fn token(
     state: Option<web::Data<AppState>>,
     client_repository: Option<web::Data<OAuthClientRepository>>,
     authorization_code_repository: Option<web::Data<AuthorizationCodeRepository>>,
+    refresh_token_repository: Option<web::Data<RefreshTokenRepository>>,
 ) -> HttpResponse {
     if let Err((error, message)) = validate_token_form(&form) {
         return HttpResponse::BadRequest().json(OAuthErrorResponse { error, message });
     }
 
     if form.grant_type == "authorization_code" {
-        if let (Some(state), Some(client_repository), Some(authorization_code_repository)) =
-            (state, client_repository, authorization_code_repository)
-        {
+        if let (
+            Some(state),
+            Some(client_repository),
+            Some(authorization_code_repository),
+            Some(refresh_token_repository),
+        ) = (
+            state,
+            client_repository,
+            authorization_code_repository,
+            refresh_token_repository,
+        ) {
             return exchange_authorization_code_grant(
                 &form,
                 &state,
                 &client_repository,
                 &authorization_code_repository,
+                &refresh_token_repository,
             )
             .await;
         }
@@ -177,6 +189,7 @@ async fn exchange_authorization_code_grant(
     state: &AppState,
     client_repository: &OAuthClientRepository,
     authorization_code_repository: &AuthorizationCodeRepository,
+    refresh_token_repository: &RefreshTokenRepository,
 ) -> HttpResponse {
     let client_id = form.client_id.as_deref().unwrap_or_default();
     let client_record = match client_repository
@@ -245,6 +258,28 @@ async fn exchange_authorization_code_grant(
             }
         };
 
+    let refresh_token = new_refresh_token();
+    let refresh_token_hash = hash_refresh_token(&refresh_token);
+    if refresh_token_repository
+        .save(NewRefreshToken {
+            id: uuid::Uuid::new_v4(),
+            user_id: stored_code.user_id,
+            client_id: client_record.id,
+            token_hash: refresh_token_hash,
+            family_id: uuid::Uuid::new_v4(),
+            scope: stored_code.scope.clone(),
+            expires_at: Utc::now()
+                + Duration::seconds(state.settings.jwt_refresh_token_ttl_seconds),
+        })
+        .await
+        .is_err()
+    {
+        return HttpResponse::InternalServerError().json(OAuthErrorResponse {
+            error: "server_error",
+            message: "Refresh token persistence failed",
+        });
+    }
+
     if authorization_code_repository
         .consume(&code_hash)
         .await
@@ -258,6 +293,7 @@ async fn exchange_authorization_code_grant(
 
     HttpResponse::Ok().json(TokenResponse {
         access_token,
+        refresh_token,
         token_type: "Bearer",
         expires_in,
         scope,

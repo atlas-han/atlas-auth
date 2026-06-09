@@ -5,6 +5,7 @@ use atlas_auth::{
     db,
     oauth::{
         authorization_code::AuthorizationCodeRepository, client_repository::OAuthClientRepository,
+        refresh_token_repository::RefreshTokenRepository,
     },
     routes,
 };
@@ -24,6 +25,7 @@ async fn main() -> anyhow::Result<()> {
     let pool = db::connect(&settings.database_url).await?;
     let client_repository = OAuthClientRepository::postgres(pool.clone());
     let authorization_code_repository = AuthorizationCodeRepository::postgres(pool.clone());
+    let refresh_token_repository = RefreshTokenRepository::postgres(pool.clone());
     let state = AppState { pool, settings };
 
     tracing::info!(%socket_addr, "starting atlas-auth");
@@ -34,6 +36,7 @@ async fn main() -> anyhow::Result<()> {
             .app_data(web::Data::new(state.clone()))
             .app_data(web::Data::new(client_repository.clone()))
             .app_data(web::Data::new(authorization_code_repository.clone()))
+            .app_data(web::Data::new(refresh_token_repository.clone()))
             .configure(routes::health::configure)
             .configure(routes::auth::configure)
             .configure(routes::oauth::configure)

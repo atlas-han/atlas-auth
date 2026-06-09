@@ -8,6 +8,7 @@ use atlas_auth::{
         },
         client_repository::{ClientRecord, OAuthClientRepository},
         pkce::s256_code_challenge,
+        refresh_token_repository::RefreshTokenRepository,
     },
     routes,
 };
@@ -90,11 +91,13 @@ async fn token_exchanges_authorization_code_with_pkce_and_consumes_code() {
         .await
         .unwrap();
     let clients = OAuthClientRepository::in_memory(vec![client_record(client_uuid)]);
+    let refresh_tokens = RefreshTokenRepository::in_memory();
     let app = test::init_service(
         App::new()
             .app_data(web::Data::new(test_state()))
             .app_data(web::Data::new(clients))
             .app_data(web::Data::new(authorization_codes.clone()))
+            .app_data(web::Data::new(refresh_tokens.clone()))
             .configure(routes::oauth::configure),
     )
     .await;
@@ -118,6 +121,10 @@ async fn token_exchanges_authorization_code_with_pkce_and_consumes_code() {
     assert_eq!(body["expires_in"], 900);
     assert_eq!(body["scope"], "openid email");
     assert!(body["access_token"].as_str().unwrap().len() > 100);
+    let refresh_token = body["refresh_token"]
+        .as_str()
+        .expect("authorization_code exchange should issue refresh token");
+    assert!(refresh_token.len() >= 96);
 
     let req = test::TestRequest::post()
         .uri("/oauth/token")
