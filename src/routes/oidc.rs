@@ -1,7 +1,11 @@
-use actix_web::{get, web, HttpResponse};
+use actix_web::{get, web, HttpRequest, HttpResponse};
+use jsonwebtoken::{decode, Algorithm, DecodingKey, Validation};
 use serde::Serialize;
 
-use crate::{app::AppState, auth::token::public_jwks};
+use crate::{
+    app::AppState,
+    auth::token::{public_jwks, Claims},
+};
 
 #[derive(Debug, Serialize)]
 struct OpenIdConfiguration {
@@ -54,6 +58,53 @@ async fn jwks(state: web::Data<AppState>) -> HttpResponse {
     }
 }
 
+#[derive(Debug, Serialize)]
+struct UserInfoResponse {
+    sub: String,
+    scope: String,
+}
+
+#[get("/userinfo")]
+async fn userinfo(request: HttpRequest, state: web::Data<AppState>) -> HttpResponse {
+    let Some(access_token) = bearer_token(&request) else {
+        return HttpResponse::Unauthorized().finish();
+    };
+
+    let mut validation = Validation::new(Algorithm::RS256);
+    validation.set_audience(&[state.settings.jwt_audience.as_str()]);
+    validation.set_issuer(&[state.settings.jwt_issuer.as_str()]);
+
+    let decoding_key = match DecodingKey::from_rsa_pem(state.settings.jwt_public_key_pem.as_bytes())
+    {
+        Ok(key) => key,
+        Err(error) => {
+            tracing::error!(%error, "failed to parse JWT public key for userinfo");
+            return HttpResponse::InternalServerError().finish();
+        }
+    };
+    let decoded = decode::<Claims>(access_token, &decoding_key, &validation);
+
+    match decoded {
+        Ok(token) => HttpResponse::Ok().json(UserInfoResponse {
+            sub: token.claims.sub,
+            scope: token.claims.scope,
+        }),
+        Err(_) => HttpResponse::Unauthorized().finish(),
+    }
+}
+
+fn bearer_token(request: &HttpRequest) -> Option<&str> {
+    request
+        .headers()
+        .get(actix_web::http::header::AUTHORIZATION)?
+        .to_str()
+        .ok()?
+        .strip_prefix("Bearer ")
+        .filter(|token| !token.trim().is_empty())
+}
+
 pub fn configure(cfg: &mut web::ServiceConfig) {
-    cfg.service(openid_configuration).service(jwks);
+    cfg.service(openid_configuration)
+        .service(jwks)
+        .service(userinfo);
 }
