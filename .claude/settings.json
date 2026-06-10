@@ -22,6 +22,18 @@
           }
         ]
       }
+    ],
+    "WorktreeRemove": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "\"$CLAUDE_PROJECT_DIR/.claude/hooks/worktree-premerge.sh\"",
+            "timeout": 120,
+            "statusMessage": "Rebasing + merging worktree into main before cleanup"
+          }
+        ]
+      }
     ]
   }
 }
