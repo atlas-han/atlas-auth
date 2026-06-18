@@ -99,9 +99,9 @@ docs/            Architecture, data model, API contract, security policy, plans
 
 ## Prerequisites
 
-- **Rust** — a stable toolchain new enough for `edition2024` (Rust **1.85+**). A transitive
-  dependency in `Cargo.lock` fails to resolve on older toolchains even though `Cargo.toml`
-  pins `rust-version = 1.78`.
+- **Rust** — a stable toolchain. `Cargo.toml` currently declares `edition = "2021"` and
+  `rust-version = "1.78"`; CI runs the latest stable toolchain. If dependency resolution
+  fails on an older local compiler, upgrade to current stable first.
 - **Docker** (optional) — for the bundled PostgreSQL via `docker compose`.
 - **`sqlx-cli`** (optional) — only needed to run migrations against a real database:
   `cargo install sqlx-cli --no-default-features --features rustls,postgres`.
@@ -154,6 +154,11 @@ In production, source these from a secret manager rather than committing them.
 ```bash
 # 1. Configuration
 cp .env.example .env
+# .env.example masks the password; docker-compose.yml uses atlas_auth / atlas_auth locally.
+# Update DATABASE_URL before running migrations or the server:
+perl -pi -e 's#^DATABASE_URL=.*#DATABASE_URL=postgres://atlas_auth:atlas_auth@localhost:5432/atlas_auth#' .env
+# OIDC discovery builds endpoint URLs from JWT_ISSUER; for local smoke tests this should be a URL.
+perl -pi -e 's#^JWT_ISSUER=.*#JWT_ISSUER=http://127.0.0.1:8080#' .env
 # generate RS256 keys and append the escaped PEM values (see "PEM key format" above)
 # set a real PASSWORD_PEPPER
 
@@ -227,7 +232,7 @@ endpoint surface:
 | POST | `/admin/clients` | Create an OAuth client. |
 | PUT | `/admin/clients/{client_id}` | Update a client. |
 | DELETE | `/admin/clients/{client_id}` | Delete a client. |
-| POST | `/admin/clients/{client_id}/rotate-secret` | Rotate the client secret. |
+| POST | `/admin/clients/{client_id}/secret/rotate` | Rotate the client secret. |
 | POST | `/admin/users` | Create a user. |
 | GET / PUT / DELETE | `/admin/users/{user_id}` | Read / update / delete a user. |
 
