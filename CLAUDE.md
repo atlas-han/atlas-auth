@@ -35,7 +35,7 @@ Building needs a stable toolchain new enough for `edition2024` (Rust ≥ 1.85); 
 
 ## Architecture
 
-Layered, roughly Clean Architecture: **HTTP routes** (`src/routes/`, DTO validation + response shaping only) → **domain logic** (`src/auth/`, `src/oauth/`, mostly pure functions) → **repositories** (PostgreSQL) → **PostgreSQL**. JWT, Argon2, and PKCE are infrastructure helpers. `src/lib.rs` exposes the modules; `src/main.rs` is the binary that wires the server. `AppState { pool, settings }` is shared via `web::Data`.
+Layered, roughly Clean Architecture: **HTTP routes** (`src/routes/`, DTO validation + response shaping only) → **domain logic** (`src/auth/`, `src/oauth/`, mostly pure functions) → **repositories** (PostgreSQL) → **PostgreSQL**. JWT, Argon2, and PKCE are infrastructure helpers. `src/lib.rs` exposes the modules; `src/main.rs` is the binary that wires the server. `AppState { pool, settings }` (`src/app.rs`) is shared via `web::Data`.
 
 Three cross-cutting patterns matter more than any single file:
 
@@ -68,12 +68,22 @@ Three cross-cutting patterns matter more than any single file:
 
 ## Testing conventions
 
-- `tests/` holds integration tests, **one concern per file** (~39 files).
+- `tests/` holds integration tests, **one concern per file** (37 files).
 - **HTTP tests** build an app with `actix_web::test::init_service(App::new().configure(routes::X::configure))` and inject in-memory repositories via `.app_data(...)` — no database.
 - **`*_schema_migration.rs` tests assert on the SQL text** of migration files (`fs::read_to_string` + `contains`). Renaming a column/index therefore requires editing both the migration and its schema test.
-- `*_repository.rs` tests exercise the in-memory variant; pure domain unit tests live in `#[cfg(test)]` modules in `src/` (e.g. `auth/token.rs`).
+- `*_repository.rs` tests exercise the in-memory variant; pure domain unit tests live in `#[cfg(test)]` modules in `src/` (currently only `auth/token.rs` and `auth/password.rs`).
 - The coverage gate (`scripts/coverage-unit.sh`) enforces 90% lines but **ignores** `main/config/db/error`, all repositories, the route handlers, and `authorization_code.rs` — it targets pure domain logic only.
 
 ## Migrations
 
 `migrations/NNNN_name.sql`, timestamp-prefixed (e.g. `202606080001_init.sql`), applied with `sqlx migrate run`. Pair each schema change with the matching `*_schema_migration.rs` text assertion.
+
+## Claude Code harness & hooks
+
+`.claude/` ships a planner→generator→evaluator harness (see `.claude/README.md`): agents `architect`, `developer`, `evaluator`, `solid-reviewer`, `security-auditor`, `technical-writer`; commands `/feature`, `/qa`, `/solid-check`, `/handoff`; skills `harness-rubric` and `solid-rust`. Agents hand off via files in `.claude/harness/` (gitignored scratch). Use `/feature` for non-trivial or token/OAuth-invariant work; edit directly for one-line fixes.
+
+Three hooks in `.claude/settings.json` change how a session behaves here:
+
+- **PostToolUse** (`hooks/rust-postedit.sh`): every `Edit`/`Write` to a `.rs` file is auto-`rustfmt`ed, and editing a `migrations/*.sql` file injects a reminder to update the paired `*_schema_migration.rs` test. Don't be surprised when a just-written file is reformatted.
+- **SessionStart** (`hooks/session-handoff.sh`): surfaces the newest `.claude/harness/handoff-*.md`, if any — read it before continuing a multi-session build.
+- **WorktreeRemove** (`hooks/worktree-premerge.sh`): when a `.claude/worktrees/*` worktree is removed, its branch is **rebased onto `main` and `main` is fast-forwarded** automatically. Cleanup is *blocked* (worktree kept) if the branch has uncommitted changes, the rebase conflicts, or the `main` checkout is dirty. So: commit in the worktree before finishing, and expect that work to land on `main` at cleanup without a PR. The log is `.claude/harness/worktree-premerge.log`.
